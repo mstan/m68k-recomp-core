@@ -1,7 +1,8 @@
 # m68k-recomp-core
 
 Shared clean-room Motorola 68000-family static-recompiler frontend used by
-`segagenesisrecomp` and `cdirecomp`.
+[segagenesisrecomp](https://github.com/mstan/segagenesisrecomp) and
+[cdirecomp](https://github.com/mstan/cdirecomp).
 
 The initial extraction deliberately preserves the two validated policy
 profiles while centralizing the genuinely common instruction layer:
@@ -38,4 +39,3 @@ package.
    hooks, then remove the duplicated profile implementations.
 6. Extract the clean-room fallback interpreter once its runtime callbacks are
    similarly explicit.
-
