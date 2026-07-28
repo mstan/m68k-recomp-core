@@ -271,6 +271,45 @@ static const WsSite *ws_site_for_kind(uint32_t addr, WsSiteKind k0, WsSiteKind k
     return NULL;
 }
 
+/* WS_SITE_ADDMEM helper: emit the wrapper that widens a memory-sourced word
+ * value by +(g_ws_margin>>shift). Declares `uint16_t _wsv<addr> = <src_expr>;`
+ * and, when g_ws_margin > 0, adds the margin — capped, if site->base != 0, at
+ * the word `base` bytes after the source operand (camera min-bound clamp:
+ * (a2) = Camera_Min_X_pos, cap = Camera_Max_X_pos at +2; never below the
+ * original value either, so a boss lock with Min == Max stays authentic).
+ * Only word-size with an (An) source is supported — anything else gets a
+ * diagnostic and no wrapper. Returns 1 and writes the wrapped C expression
+ * into `out` when emitted; returns 0 otherwise (caller keeps src_expr).
+ * margin 0 => the wrapper leaves the value untouched (identical behavior). */
+static int ws_emit_addmem_wrap(FILE *f, const WsSite *site, uint32_t addr,
+                               int src_ea, M68KSize sz,
+                               const char *src_expr, char *out, size_t outsz)
+{
+    int smode = (src_ea >> 3) & 7;
+    int sreg  = src_ea & 7;
+    if (smode != 2 || sz != M68K_SIZE_W) {
+        fprintf(stderr, "[widescreen] addmem @%06X: only word-size (An) "
+                "sources are supported — site ignored\n", addr);
+        return 0;
+    }
+    fprintf(f, "  /* [widescreen] addmem: src + (g_ws_margin>>%u)%s */\n",
+            site->shift, site->base ? ", capped" : "");
+    fprintf(f, "  uint16_t _wsv%06X = (uint16_t)(%s);\n", addr, src_expr);
+    fprintf(f, "  if (g_ws_margin) {\n");
+    fprintf(f, "    uint32_t _wsc = (uint32_t)_wsv%06X + (uint32_t)(g_ws_margin >> %u);\n",
+            addr, site->shift);
+    if (site->base) {
+        fprintf(f, "    uint16_t _wscap = m68k_read16((uint32_t)(g_cpu.A[%d] + %uu));\n",
+                sreg, (unsigned)site->base);
+        fprintf(f, "    if (_wsc > (uint32_t)_wscap) _wsc = _wscap;\n");
+        fprintf(f, "    if (_wsc < (uint32_t)_wsv%06X) _wsc = _wsv%06X;\n", addr, addr);
+    }
+    fprintf(f, "    _wsv%06X = (uint16_t)_wsc;\n", addr);
+    fprintf(f, "  }\n");
+    snprintf(out, outsz, "(uint16_t)(_wsv%06X)", addr);
+    return 1;
+}
+
 /* Optional diagnostic: when set (via --dump-functions), codegen_emit writes
  * the final post-boundary-split function-entry set (one hex address per line)
  * to this path. Powers the heuristic-coverage exercise: diff the dump from a
@@ -2589,6 +2628,18 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
 
         emit_ea_load(f, instr, src_ea, sz, &er_src, stmp, src_expr);
 
+        /* [widescreen] addmem: widen a memory-sourced moved value by
+         * +(g_ws_margin>>shift), capped at the word `base` bytes after it —
+         * the store half of the camera min-bound clamp (must produce the SAME
+         * capped value the paired cmp addmem compared against). */
+        const WsSite *_wsam = ws_site_for_kind(addr, WS_SITE_ADDMEM, WS_SITE_ADDMEM);
+        char wsmv[64];
+        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, src_ea, sz,
+                                         src_expr, wsmv, sizeof(wsmv))) {
+            emit_ea_store(f, instr, dst_ea, sz, &er_dst, wsmv);
+            emit_flags_logic(f, wsmv, sz);
+            break;
+        }
         /* [widescreen] addimm/subimm: widen the moved immediate by
          * +/-(g_ws_margin>>shift) before the store (e.g. move.w #320,d5 ->
          * right-edge tile-load column seed). margin 0 => identical. */
@@ -2842,13 +2893,22 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         int dreg = instr->reg;
         const char *ct = size_ctype(sz);
         emit_ea_load(f, instr, instr->src_ea, sz, &er, tmp, src_expr);
+        /* [widescreen] addmem: widen the memory-sourced compare value by
+         * +(g_ws_margin>>shift), capped at the word `base` bytes after it
+         * (camera min-bound clamp). margin 0 => identical. */
+        char wsv[64];
+        const char *csrc = src_expr;
+        const WsSite *_wsam = ws_site_for_kind(addr, WS_SITE_ADDMEM, WS_SITE_ADDMEM);
+        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, instr->src_ea, sz,
+                                         src_expr, wsv, sizeof(wsv)))
+            csrc = wsv;
         char res[64];
         snprintf(res, sizeof(res), "_%06Xr", addr);
         fprintf(f, "  %s %s = (%s)((%s)g_cpu.D[%d] - (%s)(%s));\n",
-                ct, res, ct, ct, dreg, ct, src_expr);
+                ct, res, ct, ct, dreg, ct, csrc);
         char da[256], db[256];
         snprintf(da, sizeof(da), "(%s)g_cpu.D[%d]", ct, dreg);
-        snprintf(db, sizeof(db), "(%s)(%s)", ct, src_expr);
+        snprintf(db, sizeof(db), "(%s)(%s)", ct, csrc);
         emit_flags_cmp(f, da, db, res, sz);
         break;
     }
