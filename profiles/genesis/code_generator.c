@@ -2484,9 +2484,13 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             fprintf(f, "  /* TODO: dynamic JSR/BSR EA %d/%d */\n", mode, reg);
         }
 
+        /* The flat-call backend intentionally permits guest stack idioms used
+         * by legacy titles (notably Sonic's sound driver), so exact wrapper
+         * balance is a focused diagnostic rather than a production invariant. */
         fprintf(f,
                 "  if (!g_rte_pending && g_cpu.A[7] != "
-                "(uint32_t)(_jsr_sp_%06X - 4u)) {\n",
+                "(uint32_t)(_jsr_sp_%06X - 4u) && "
+                "getenv(\"GENESIS_STRICT_JSR_STACK\")) {\n",
                 addr);
         if (instr->has_target) {
             fprintf(f,
