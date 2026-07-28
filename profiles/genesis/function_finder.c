@@ -52,6 +52,7 @@ static int s_jt_bounded_promotions    = 0;  /* explicit abs-table entries >64 */
  * gated additive promotions (long tables beyond the static cap, JSR tables). */
 static int s_jt_jsr_word_tables       = 0;  /* word-offset jsr tables found    */
 static int s_jt_runtime_promotions    = 0;  /* targets added via runtime oracle */
+static int s_function_pointer_edges   = 0;  /* configured helper edges matched  */
 
 /* Per-site record for every dispatch we couldn't enumerate. Dumped to
  * <diagnostics_dir>/<prefix>.unresolved_jumptables.log so the user can grep
@@ -599,6 +600,51 @@ static bool function_captures_return_addr(const GenesisRom *rom, uint32_t start)
     return false;
 }
 
+/* Some games pass an object/state handler to a helper in A1:
+ *
+ *     lea     Handler.l,a1
+ *     bsr.w   AllocateObject
+ *
+ * The call target alone says nothing about A1, so ordinary control-flow
+ * discovery cannot see Handler. A per-game `function_pointer_helpers` entry
+ * supplies the missing helper semantics. Keep the syntactic side deliberately
+ * strict: the load must be immediately before the configured direct call, use
+ * A1, and contain an absolute ROM address. */
+static bool configured_function_pointer_edge(const GameConfig *cfg,
+                                             const M68KInstr *load,
+                                             uint32_t helper,
+                                             uint32_t rom_size,
+                                             uint32_t *target_out) {
+    if (!cfg || !load || !target_out) return false;
+    bool configured = false;
+    for (int i = 0; i < cfg->function_pointer_helper_count; i++) {
+        if (cfg->function_pointer_helpers[i] == helper) {
+            configured = true;
+            break;
+        }
+    }
+    if (!configured || load->reg != 1) return false; /* destination A1 */
+
+    int mode = (load->src_ea >> 3) & 7;
+    int reg  = load->src_ea & 7;
+    uint32_t target;
+    if (load->mnemonic == MN_LEA
+            && mode == EA_PCR && reg == PCR_ABS_L
+            && load->word_count >= 3) {
+        target = ((uint32_t)load->words[1] << 16) | load->words[2];
+    } else if (load->mnemonic == MN_MOVEA
+            && load->size == M68K_SIZE_L
+            && mode == EA_PCR && reg == PCR_IMM
+            && load->word_count >= 3) {
+        target = ((uint32_t)load->words[1] << 16) | load->words[2];
+    } else {
+        return false;
+    }
+    if ((target & 1) || target >= rom_size) return false;
+    *target_out = target;
+    return true;
+}
+
 /* Strict variant used by the code generator (NOT discovery).
  *
  * Returns true only if the routine UNCONDITIONALLY pops its own return
@@ -655,6 +701,7 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
     s_jt_twostep_sites    = 0;
     s_jt_twostep_tables   = 0;
     s_jt_bounded_promotions = 0;
+    s_function_pointer_edges = 0;
     /* Reuse the unresolved-site buffer across runs but reset its
      * logical length. Capacity is preserved so the next run avoids
      * re-allocating from scratch. */
@@ -726,13 +773,26 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
             if (m68k_is_call(&instr) && instr.has_target
                     && !game_config_is_blacklisted(cfg, instr.target_addr)) {
                 add_function(list, instr.target_addr);
+                uint32_t pointer_target;
+                if (have_prev && configured_function_pointer_edge(
+                        cfg, &prev_instr, instr.target_addr,
+                        rom->rom_size, &pointer_target)
+                        && !game_config_is_blacklisted(cfg, pointer_target)) {
+                    add_function(list, pointer_target);
+                    s_function_pointer_edges++;
+                }
                 /* If the callee captures its return address off the stack and
                  * repurposes it as a code pointer (Obj_WaitOffscreen idiom),
                  * the return address is a live dispatch entry — register it.
                  * add_function code-gates it, so data return addresses (e.g.
                  * inline-parameter callees) are rejected. */
-                if (discovery_phase == 0
-                        && function_captures_return_addr(rom, instr.target_addr))
+                /* This semantic edge is equally valid during the audited
+                 * late-root phase. Late roots deliberately disable speculative
+                 * table discovery, but a direct call to a return-capturing
+                 * helper proves that its continuation is a future indirect
+                 * entry. Keeping this phase-gated made state machines rooted
+                 * via late_extra lose their next-state entries. */
+                if (function_captures_return_addr(rom, instr.target_addr))
                     add_function(list, pc + instr.byte_length);
             }
 
@@ -1025,6 +1085,8 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
            "tables_enumerated=%d bounded_promotions=%d\n",
            s_jt_twostep_sites, s_jt_twostep_tables,
            s_jt_bounded_promotions);
+    printf("[FunctionFinder] Configured function-pointer helper edges: %d\n",
+           s_function_pointer_edges);
     printf("[FunctionFinder] JSR (d8,PC,Xn) word-offset call tables: %d; "
            "runtime-oracle additive promotions: %d\n",
            s_jt_jsr_word_tables, s_jt_runtime_promotions);
