@@ -386,11 +386,10 @@ static void emit_ea_load_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize sz
     case 6: { /* (d8,An,Xn) */
         uint16_t ext = er_next(er);
         int      xreg  = (ext >> 12) & 7;
-        int      xtype = (ext >> 15) & 1; /* 0=Dn, 1=An */
         int8_t   d8    = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-        fprintf(f, "  %s %s = %s((uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d)));\n",
-                ct, tmp, rf, reg, xr, xreg, (int)d8);
+        fprintf(f, "  %s %s = %s((uint32_t)(g_cpu.A[%d] + "
+                "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)));\n",
+                ct, tmp, rf, reg, ext, xreg, xreg, (int)d8);
         snprintf(out_expr, 256, "%s", tmp);
         break;
     }
@@ -424,11 +423,10 @@ static void emit_ea_load_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize sz
             uint32_t pc_addr = instr->addr + er->bp;
             uint16_t ext = er_next(er);
             int      xreg  = (ext >> 12) & 7;
-            int      xtype = (ext >> 15) & 1;
             int8_t   d8    = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-            fprintf(f, "  %s %s = %s((uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d)));\n",
-                    ct, tmp, rf, pc_addr, xr, xreg, (int)d8);
+            fprintf(f, "  %s %s = %s((uint32_t)(0x%08X + "
+                    "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)));\n",
+                    ct, tmp, rf, pc_addr, ext, xreg, xreg, (int)d8);
             snprintf(out_expr, 256, "%s", tmp);
             break;
         }
@@ -496,12 +494,11 @@ static void emit_ea_addr_ex(FILE *f, const M68KInstr *instr, int ea,
     case 6: {
         uint16_t ext = er_next(er);
         int xreg  = (ext >> 12) & 7;
-        int xtype = (ext >> 15) & 1;
         int8_t d8 = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
         snprintf(out_expr, 256,
-                 "(uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d))",
-                 reg, xr, xreg, (int)d8);
+                 "(uint32_t)(g_cpu.A[%d] + "
+                 "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                 reg, ext, xreg, xreg, (int)d8);
         break;
     }
     case 7:
@@ -528,14 +525,12 @@ static void emit_ea_addr_ex(FILE *f, const M68KInstr *instr, int ea,
             uint32_t pc_addr = instr->addr + er->bp;
             uint16_t ext = er_next(er);
             int xreg  = (ext >> 12) & 7;
-            int xtype = (ext >> 15) & 1;
             int8_t d8 = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
             snprintf(out_expr, 256,
                      u_suffix
-                       ? "(uint32_t)(0x%08Xu + (int32_t)(int16_t)%s[%d] + (%d))"
-                       : "(uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d))",
-                     pc_addr, xr, xreg, (int)d8);
+                       ? "(uint32_t)(0x%08Xu + m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))"
+                       : "(uint32_t)(0x%08X + m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                     pc_addr, ext, xreg, xreg, (int)d8);
             break;
         }
         default:
@@ -627,11 +622,10 @@ static void emit_ea_store_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize s
     case 6: { /* (d8,An,Xn) */
         uint16_t ext = er_next(er);
         int xreg  = (ext >> 12) & 7;
-        int xtype = (ext >> 15) & 1;
         int8_t d8 = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-        fprintf(f, "  %s((uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d)), (%s)(%s));\n",
-                wf, reg, xr, xreg, (int)d8, ct, val_expr);
+        fprintf(f, "  %s((uint32_t)(g_cpu.A[%d] + "
+                "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)), (%s)(%s));\n",
+                wf, reg, ext, xreg, xreg, (int)d8, ct, val_expr);
         break;
     }
     case 7:
@@ -2457,7 +2451,13 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             break;
         }
 
-        /* Simulate JSR/BSR stack: push return address onto the 68K stack. */
+        /* Simulate JSR/BSR stack: push return address onto the 68K stack.
+         * Remember the pre-call SP so a normal return can be checked before
+         * this wrapper removes the return slot.  A callee that returns
+         * normally must leave A7 at exactly pre_sp - 4; anything else means
+         * the generated C call/return model has lost the 68K stack contract
+         * and continuing would turn saved registers into dispatch targets. */
+        fprintf(f, "  uint32_t _jsr_sp_%06X = g_cpu.A[7];\n", addr);
         fprintf(f, "  recomp_push_return(0x%06Xu); /* JSR push */\n", ret_addr);
 
         if (instr->has_target) {
@@ -2483,6 +2483,28 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                                 func_name, func_addr);
             fprintf(f, "  /* TODO: dynamic JSR/BSR EA %d/%d */\n", mode, reg);
         }
+
+        fprintf(f,
+                "  if (!g_rte_pending && g_cpu.A[7] != "
+                "(uint32_t)(_jsr_sp_%06X - 4u)) {\n",
+                addr);
+        if (instr->has_target) {
+            fprintf(f,
+                    "    fprintf(stderr, \"JSR stack mismatch at $%06X -> "
+                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
+                    "_jsr_sp_%06X, g_cpu.A[7], "
+                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    addr, bsr_target, addr, addr);
+        } else {
+            fprintf(f,
+                    "    fprintf(stderr, \"dynamic JSR stack mismatch at "
+                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
+                    "_jsr_sp_%06X, g_cpu.A[7], "
+                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    addr, addr, addr);
+        }
+        fprintf(f, "    exit(3);\n");
+        fprintf(f, "  }\n");
 
         /* Pop return address from 68K stack.
          * Check g_rte_pending BEFORE the pop: when the callee used the
@@ -2559,7 +2581,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: in-function dispatch — base $%06X + %s[%d], %d targets (Duff's device) */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg, npc);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  switch ((int16_t)%s[%d]) {\n", xr, xreg);
+                fprintf(f, "  switch ((int32_t)m68k_brief_index_value(0x%04Xu, "
+                        "g_cpu.D[%d], g_cpu.A[%d])) {\n", ext, xreg, xreg);
                 { int32_t seen_offsets[512]; int seen_count = 0;
                   for (int t = 0; t < npc; t++) {
                     int32_t off = (int32_t)(pc_targets[t] - base);
@@ -2569,8 +2592,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     seen_offsets[seen_count++] = off;
                     fprintf(f, "    case %d: goto label_%06X;\n", off, pc_targets[t]);
                 } }
-                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]); return;\n",
-                        base, xr, xreg);
+                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d])); return;\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  }\n");
             } else if (not_ >= 1) {
                 /* Case (b): offset-table dispatch — `dc.w (target - base)`
@@ -2583,7 +2607,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: in-function dispatch — base $%06X + %s[%d], %d targets (offset table) */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg, not_);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  switch ((int16_t)%s[%d]) {\n", xr, xreg);
+                fprintf(f, "  switch ((int32_t)m68k_brief_index_value(0x%04Xu, "
+                        "g_cpu.D[%d], g_cpu.A[%d])) {\n", ext, xreg, xreg);
                 { int seen_offsets[512]; int seen_count = 0;
                   for (int t = 0; t < not_; t++) {
                     int dup = 0;
@@ -2593,8 +2618,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     fprintf(f, "    case %d: goto label_%06X;\n",
                             ot_offsets[t], ot_targets[t]);
                 } }
-                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]); return;\n",
-                        base, xr, xreg);
+                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d])); return;\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  }\n");
             } else {
                 /* Case (c): nothing recognised — fall back to runtime dispatch. */
@@ -2603,8 +2629,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: interpret handler at base $%06X + %s[%d] */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]);\n",
-                        base, xr, xreg);
+                fprintf(f, "  hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]));\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  return;\n");
             }
         } else {
@@ -2819,6 +2846,12 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             /* Update N,Z; clear V,C */
             emit_flags_logic(f, src_expr, sz);
         }
+        if (*has_sp_adjust && sz == M68K_SIZE_L) {
+            if (src_ea == ((EA_An_POST << 3) | 7))
+                fprintf(f, "  _sp_popped += 1; /* MOVE.L (SP)+ */\n");
+            if (dst_ea == ((EA_An_PRE << 3) | 7))
+                fprintf(f, "  _sp_popped -= 1; /* MOVE.L -(SP) */\n");
+        }
         break;
     }
 
@@ -2832,6 +2865,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         } else {
             fprintf(f, "  g_cpu.A[%d] = (uint32_t)(%s);\n", areg, src_expr);
         }
+        if (*has_sp_adjust && sz == M68K_SIZE_L
+                && instr->src_ea == ((EA_An_POST << 3) | 7))
+            fprintf(f, "  _sp_popped += 1; /* MOVEA.L (SP)+ */\n");
         break;
     }
 
@@ -2847,6 +2883,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
     case MN_PEA: {
         emit_ea_addr(f, instr, instr->src_ea, &er, addr_expr);
         fprintf(f, "  g_cpu.A[7] -= 4; m68k_write32(g_cpu.A[7], %s);\n", addr_expr);
+        if (*has_sp_adjust)
+            fprintf(f, "  _sp_popped -= 1; /* PEA pushes one longword */\n");
         break;
     }
 
@@ -3665,12 +3703,11 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         case 6: {
             uint16_t ext = er_next(&er2);
             int xreg  = (ext >> 12) & 7;
-            int xtype = (ext >> 15) & 1;
             int8_t d8 = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
             snprintf(base_expr, sizeof(base_expr),
-                     "(uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d))",
-                     reg, xr, xreg, (int)d8);
+                     "(uint32_t)(g_cpu.A[%d] + "
+                     "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                     reg, ext, xreg, xreg, (int)d8);
             break;
         }
         case 7:
@@ -3700,12 +3737,11 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 uint32_t pc_addr = instr->addr + er2.bp;
                 uint16_t ext = er_next(&er2);
                 int xreg  = (ext >> 12) & 7;
-                int xtype = (ext >> 15) & 1;
                 int8_t d8 = (int8_t)(ext & 0xFF);
-                const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
                 snprintf(base_expr, sizeof(base_expr),
-                         "(uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d))",
-                         pc_addr, xr, xreg, (int)d8);
+                         "(uint32_t)(0x%08X + "
+                         "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                         pc_addr, ext, xreg, xreg, (int)d8);
                 break;
             }
             default:
@@ -3798,6 +3834,18 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "    g_cpu.A[%d] = _mbase; }\n", reg);
             else
                 fprintf(f, "  }\n");
+        }
+        if (*has_sp_adjust && sz == M68K_SIZE_L && reg == 7) {
+            int reg_count = 0;
+            for (int bit = 0; bit < 16; bit++)
+                if (mask & (1u << bit))
+                    reg_count++;
+            if (dir == 1 && mode == 3)
+                fprintf(f, "  _sp_popped += %d; /* MOVEM.L (SP)+ */\n",
+                        reg_count);
+            else if (dir == 0 && mode == 4)
+                fprintf(f, "  _sp_popped -= %d; /* MOVEM.L -(SP) */\n",
+                        reg_count);
         }
         break;
     }
@@ -4336,6 +4384,8 @@ static void emit_decls_preamble(FILE *f) {
     fprintf(f, " * translation units (see cmake/GenesisRecompGenerated.cmake). */\n");
     fprintf(f, "#include \"genesis_runtime.h\"\n");
     fprintf(f, "#include \"game_extras.h\"\n");
+    fprintf(f, "#include <stdio.h>\n");
+    fprintf(f, "#include <stdlib.h>\n");
     if (s_reverse_debug) {
         /* Pull in the reverse-debugger API: g_rdb_current_func extern
          * (Tier 1) and rdb_on_block inline fast path (Tier 2). Header
@@ -4760,8 +4810,12 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             }
         }
 
-        /* Pre-scan: check if any instruction is ADDQ/ADDA to A7 (sp).
-         * If so, emit a local _sp_popped variable for early-exit tracking. */
+        /* Pre-scan for instructions that can change A7 by whole longwords.
+         * `_sp_popped` tracks the path-local net delta.  Besides explicit
+         * ADDQ stack skips, this must include MOVE/MOVEM postincrement pops:
+         * a helper may consume its JSR return slot on only one branch, which
+         * cannot be classified as either an ordinary or an unconditional
+         * return-capturing callee at the call site. */
         int has_sp_adjust = 0;
         for (int j = 0; j < instrs.count; j++) {
             M68KInstr pre;
@@ -4771,6 +4825,28 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                     pre.size == M68K_SIZE_L && (pre.imm32 % 4) == 0 && pre.imm32 > 0) {
                     has_sp_adjust = 1;
                     break;
+                }
+                if (pre.size == M68K_SIZE_L
+                        && (pre.mnemonic == MN_MOVE || pre.mnemonic == MN_MOVEA)
+                        && pre.src_ea == ((EA_An_POST << 3) | 7)) {
+                    has_sp_adjust = 1;
+                    break;
+                }
+                if (pre.size == M68K_SIZE_L && pre.mnemonic == MN_MOVE
+                        && pre.dst_ea == ((EA_An_PRE << 3) | 7)) {
+                    has_sp_adjust = 1;
+                    break;
+                }
+                if (pre.size == M68K_SIZE_L && pre.mnemonic == MN_MOVEM) {
+                    int dir = (pre.words[0] >> 10) & 1;
+                    int mode = (pre.src_ea >> 3) & 7;
+                    int reg = pre.src_ea & 7;
+                    if (reg == 7
+                            && ((dir == 1 && mode == 3)
+                                || (dir == 0 && mode == 4))) {
+                        has_sp_adjust = 1;
+                        break;
+                    }
                 }
             }
         }
