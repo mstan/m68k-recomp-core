@@ -4850,8 +4850,14 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                 }
             }
         }
-        if (has_sp_adjust)
-            fprintf(f_func, "  int _sp_popped = 0;\n");
+        if (has_sp_adjust) {
+            /* A generated split-function tail call is one 68K control-flow
+             * path, not a real JSR boundary.  Consume its carried net stack
+             * delta into this function's path-local accounting before any
+             * MOVEM/ADDQ adjustment changes it. */
+            fprintf(f_func, "  int _sp_popped = g_split_sp_popped;\n");
+            fprintf(f_func, "  g_split_sp_popped = 0;\n");
+        }
 
         /* TEMPORARY debug counters for VBla chain tracing */
         if (func_addr == 0x000B64)
