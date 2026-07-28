@@ -1693,7 +1693,6 @@ static uint32_t *build_entry_owners(const GenesisRom *rom,
  * g_vblank_threshold (109,312 cycles = scanline 224).
  * ========================================================================= */
 
-#include "cycle_probe.h"
 
 /* popcount of a 16-bit mask — used for MOVEM register count. */
 static int popcount16(uint16_t v) {
@@ -2084,16 +2083,11 @@ static int estimate_cycles_prm(const M68KInstr *instr)
     }
 }
 
-/* Primary cycle-cost entry point. Asks the clown68000 interpreter (via
- * cycle_probe) for the exact cost; falls back to the PRM-derived table
- * above if the probe isn't initialised (e.g. unit-test paths) or if
- * clown returned an unreasonable value. */
-/* Per-address record of the EXACT cost the generated code was stamped with
- * (clown-measured, or PRM fallback). Emitted as <prefix>_cycles.c so the
- * runtime interpreter / Tier-3 floor can charge the SAME cost the recompiled
- * code does — otherwise the interp (PRM estimate) and recomp (clown-measured)
- * disagree on g_audio_cycle_counter, which drives audio-stamp pacing. Indexed
- * by addr>>1 (68K instructions are word-aligned); 0 = not recorded. */
+/* Per-address record of the EXACT cost the generated code was stamped with.
+ * Emitted as <prefix>_cycles.c so the Tier-3 interpreter floor charges the
+ * SAME cost the recompiled code does — otherwise the two disagree on
+ * g_audio_cycle_counter, which drives audio-stamp pacing. Indexed by addr>>1
+ * (68K instructions are word-aligned); 0 = not recorded. */
 static uint16_t *g_insn_cost_by_addr = NULL;   /* [0x200000] */
 static void insn_cost_record(uint32_t addr, int cost) {
     if (!g_insn_cost_by_addr)
@@ -2104,9 +2098,9 @@ static void insn_cost_record(uint32_t addr, int cost) {
 /* Emit the sorted (addr,cost) table (called from main after codegen). */
 void emit_insn_cost_table(FILE *f) {
     fprintf(f, "/* AUTO-GENERATED per-instruction cycle costs — do not edit.\n"
-               " * The EXACT costs the recompiled code was stamped with (clown-\n"
-               " * measured via cycle_probe, or PRM fallback). game_cycles.c looks\n"
-               " * these up so the interpreter/floor pace identically. */\n");
+               " * The EXACT costs the recompiled code was stamped with by the\n"
+               " * clean-room timing model. game_cycles.c looks these up so the\n"
+               " * Tier-3 interpreter floor paces identically. */\n");
     fprintf(f, "#include \"game_cycles.h\"\n\n");
     fprintf(f, "const GameInsnCost g_game_insn_costs[] = {\n");
     size_t n = 0;
@@ -2127,12 +2121,10 @@ void emit_insn_cost_table(FILE *f) {
  * a complete census of the codegen run rather than a sampled window — no
  * arming, no timing window to miss.
  *
- * Columns: addr,opcode,mnemonic,size,measured,prm
- *   prm      = the emitted cost, from the clean-room model. Always present.
- *   measured = clown68000's reading, for VALIDATION ONLY. Requires the
- *              optional -DGENESIS_CYCLE_ORACLE build; -1 otherwise.
- * The census never influences the emitted cost, so enabling it cannot change
- * generated code. */
+ * Columns: addr,opcode,mnemonic,size,cost -- cost is what was emitted.
+ * Diffing two censuses is how a change to the timing model is reviewed now
+ * that there is no interpreter to compare against. The census never
+ * influences the emitted cost, so enabling it cannot change generated code. */
 static FILE *g_cycle_diag_f    = NULL;
 static int   g_cycle_diag_init = 0;
 
@@ -2144,24 +2136,23 @@ static FILE *cycle_diag_file(void)
         if (path && *path) {
             g_cycle_diag_f = fopen(path, "w");
             if (g_cycle_diag_f)
-                fprintf(g_cycle_diag_f, "addr,opcode,mnemonic,size,measured,prm\n");
+                fprintf(g_cycle_diag_f, "addr,opcode,mnemonic,size,cost\n");
         }
     }
     return g_cycle_diag_f;
 }
 
-/* Sole cycle-cost entry point. The clean-room model IS the cost — there is no
- * oracle in this path, so codegen is deterministic and reproducible from the
- * ROM and config alone, with or without a clownmdemu checkout. */
+/* Sole cycle-cost entry point. The clean-room model IS the cost, so codegen is
+ * deterministic and reproducible from the ROM and config alone. */
 static int estimate_cycles(const M68KInstr *instr)
 {
     int cost = estimate_cycles_prm(instr);
 
     FILE *diag = cycle_diag_file();
     if (diag) {
-        fprintf(diag, "0x%06X,0x%04X,%d,%d,%d,%d\n",
+        fprintf(diag, "0x%06X,0x%04X,%d,%d,%d\n",
                 instr->addr, instr->words[0], (int)instr->mnemonic,
-                (int)instr->size, cycle_probe_measure(instr->addr), cost);
+                (int)instr->size, cost);
     }
 
     insn_cost_record(instr->addr, cost);
