@@ -442,11 +442,10 @@ static void emit_ea_load_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize sz
     case 6: { /* (d8,An,Xn) */
         uint16_t ext = er_next(er);
         int      xreg  = (ext >> 12) & 7;
-        int      xtype = (ext >> 15) & 1; /* 0=Dn, 1=An */
         int8_t   d8    = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-        fprintf(f, "  %s %s = %s((uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d)));\n",
-                ct, tmp, rf, reg, xr, xreg, (int)d8);
+        fprintf(f, "  %s %s = %s((uint32_t)(g_cpu.A[%d] + "
+                "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)));\n",
+                ct, tmp, rf, reg, ext, xreg, xreg, (int)d8);
         snprintf(out_expr, 256, "%s", tmp);
         break;
     }
@@ -480,11 +479,10 @@ static void emit_ea_load_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize sz
             uint32_t pc_addr = instr->addr + er->bp;
             uint16_t ext = er_next(er);
             int      xreg  = (ext >> 12) & 7;
-            int      xtype = (ext >> 15) & 1;
             int8_t   d8    = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-            fprintf(f, "  %s %s = %s((uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d)));\n",
-                    ct, tmp, rf, pc_addr, xr, xreg, (int)d8);
+            fprintf(f, "  %s %s = %s((uint32_t)(0x%08X + "
+                    "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)));\n",
+                    ct, tmp, rf, pc_addr, ext, xreg, xreg, (int)d8);
             snprintf(out_expr, 256, "%s", tmp);
             break;
         }
@@ -552,12 +550,11 @@ static void emit_ea_addr_ex(FILE *f, const M68KInstr *instr, int ea,
     case 6: {
         uint16_t ext = er_next(er);
         int xreg  = (ext >> 12) & 7;
-        int xtype = (ext >> 15) & 1;
         int8_t d8 = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
         snprintf(out_expr, 256,
-                 "(uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d))",
-                 reg, xr, xreg, (int)d8);
+                 "(uint32_t)(g_cpu.A[%d] + "
+                 "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                 reg, ext, xreg, xreg, (int)d8);
         break;
     }
     case 7:
@@ -584,14 +581,12 @@ static void emit_ea_addr_ex(FILE *f, const M68KInstr *instr, int ea,
             uint32_t pc_addr = instr->addr + er->bp;
             uint16_t ext = er_next(er);
             int xreg  = (ext >> 12) & 7;
-            int xtype = (ext >> 15) & 1;
             int8_t d8 = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
             snprintf(out_expr, 256,
                      u_suffix
-                       ? "(uint32_t)(0x%08Xu + (int32_t)(int16_t)%s[%d] + (%d))"
-                       : "(uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d))",
-                     pc_addr, xr, xreg, (int)d8);
+                       ? "(uint32_t)(0x%08Xu + m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))"
+                       : "(uint32_t)(0x%08X + m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                     pc_addr, ext, xreg, xreg, (int)d8);
             break;
         }
         default:
@@ -683,11 +678,10 @@ static void emit_ea_store_ex(FILE *f, const M68KInstr *instr, int ea, M68KSize s
     case 6: { /* (d8,An,Xn) */
         uint16_t ext = er_next(er);
         int xreg  = (ext >> 12) & 7;
-        int xtype = (ext >> 15) & 1;
         int8_t d8 = (int8_t)(ext & 0xFF);
-        const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
-        fprintf(f, "  %s((uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d)), (%s)(%s));\n",
-                wf, reg, xr, xreg, (int)d8, ct, val_expr);
+        fprintf(f, "  %s((uint32_t)(g_cpu.A[%d] + "
+                "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d)), (%s)(%s));\n",
+                wf, reg, ext, xreg, xreg, (int)d8, ct, val_expr);
         break;
     }
     case 7:
@@ -1749,7 +1743,6 @@ static uint32_t *build_entry_owners(const GenesisRom *rom,
  * g_vblank_threshold (109,312 cycles = scanline 224).
  * ========================================================================= */
 
-#include "cycle_probe.h"
 
 /* popcount of a 16-bit mask — used for MOVEM register count. */
 static int popcount16(uint16_t v) {
@@ -1758,14 +1751,41 @@ static int popcount16(uint16_t v) {
     return c;
 }
 
-/* PRM Table B-1: extra cycles to fetch an operand through this
- * effective address, beyond the instruction's base cost. Size-dependent:
- * longword costs one extra memory round-trip vs byte/word. */
-static int ea_read_cost(int ea, M68KSize sz)
+/* ===========================================================================
+ * MC68000 instruction timing model (Programmer's Reference Manual, Appendix
+ * B / "Instruction Execution Times").
+ *
+ * DECODER CONTRACT — the thing that made the old table wrong. `dst_ea` is
+ * populated by exactly ONE decoder path: the MOVE/MOVEA family
+ * (m68k_decoder.c:239). Every other instruction leaves `dst_ea` at its
+ * memset-0 value, which reads back as "Dn". Any cost rule that keyed off
+ * `dst_ea` therefore silently skipped the operand EA cost for CLR, TST, NEG,
+ * NOT, ADDQ/SUBQ, the immediate-arith family, the bit instructions, Scc and
+ * the memory shifts — a systematic undercount on ~27% of all instructions.
+ * The operand EA for every non-MOVE instruction lives in `src_ea`.
+ *
+ * STATIC-STAMP POLICY. These costs are stamped once per address at codegen
+ * time and summed into g_audio_cycle_counter at runtime, so instructions
+ * whose real cost depends on runtime state must be pinned to one documented
+ * value:
+ *   - Bcc / DBcc / BRA / BSR      -> the TAKEN cost. Branch-dominated loops
+ *                                    are the common case, and taken is a real
+ *                                    hardware value rather than an average.
+ *   - Scc                         -> the TRUE cost (Dn form; 6 not 4).
+ *   - Register-count shifts       -> average count of 4.
+ *   - MULU / MULS                 -> 38 + 2*8, the average-operand form.
+ *   - DIVU / DIVS                 -> PRM worst case (the spread is narrow).
+ * ======================================================================== */
+
+/* PRM Table 8-1 "Effective Address Calculation Times" — cycles to compute
+ * and FETCH an operand through this EA, on top of the instruction base.
+ * Size-dependent: a longword costs one extra memory round-trip. */
+static int ea_calc_cost(int ea, M68KSize sz)
 {
     int is_long = (sz == M68K_SIZE_L);
     int mode    = (ea >> 3) & 7;
     int reg     =  ea       & 7;
+    if (ea < 0) return 0;                      /* -1 = immediate pseudo-operand */
     switch (mode) {
     case 0: /* Dn */           return 0;
     case 1: /* An */           return 0;
@@ -1786,102 +1806,233 @@ static int ea_read_cost(int ea, M68KSize sz)
     return 0;
 }
 
-/* Write cost mirrors read for the valid destination modes (no
- * PC-relative or immediate — those aren't valid write targets on 68000). */
-static int ea_write_cost(int ea, M68KSize sz)
+/* MOVE DESTINATION cost. Distinct from ea_calc_cost: on a MOVE destination
+ * the predecrement is overlapped with the write, so -(An) costs the same as
+ * (An) (4/8) rather than the 6/10 an operand FETCH through -(An) costs.
+ * PC-relative and immediate are not legal destinations. */
+static int ea_move_dst_cost(int ea, M68KSize sz)
 {
-    return ea_read_cost(ea, sz);
+    int is_long = (sz == M68K_SIZE_L);
+    int mode    = (ea >> 3) & 7;
+    int reg     =  ea       & 7;
+    if (ea < 0) return 0;
+    switch (mode) {
+    case 0: /* Dn */           return 0;
+    case 1: /* An */           return 0;
+    case 2: /* (An)        */  return is_long ? 8  : 4;
+    case 3: /* (An)+       */  return is_long ? 8  : 4;
+    case 4: /* -(An)       */  return is_long ? 8  : 4;   /* NOT 10/6 */
+    case 5: /* d16(An)     */  return is_long ? 12 : 8;
+    case 6: /* d8(An,Xn)   */  return is_long ? 14 : 10;
+    case 7:
+        switch (reg) {
+        case 0: /* (xxx).W  */ return is_long ? 12 : 8;
+        case 1: /* (xxx).L  */ return is_long ? 16 : 12;
+        }
+    }
+    return 0;
+}
+
+static int ea_is_reg(int ea)      /* Dn or An */
+{
+    if (ea < 0) return 0;
+    return ((ea >> 3) & 7) <= 1;
+}
+
+/* Dn / An / #imm — the source forms that add 2 cycles to the LONG
+ * "<ea>,Dn" arithmetic forms (PRM's "+2 if source is register or
+ * immediate" footnote on ADD/SUB/AND/OR/CMP and ADDA/SUBA). */
+static int ea_is_reg_or_imm(int ea)
+{
+    if (ea < 0) return 1;
+    int mode = (ea >> 3) & 7;
+    return mode <= 1 || (mode == 7 && (ea & 7) == 4);
+}
+
+/* JMP / JSR / LEA / PEA carry their own complete per-mode timings rather
+ * than base+EA. Column order: JMP, JSR, LEA, PEA. */
+static int ea_control_cost(int ea, int col)
+{
+    static const int T[8][4] = {
+        /*                JMP  JSR  LEA  PEA */
+        /* 0 (An)     */ {  8,  16,   4,  12 },
+        /* 1 (d16,An) */ { 10,  18,   8,  16 },
+        /* 2 (d8,An,X)*/ { 14,  22,  12,  20 },
+        /* 3 (xxx).W  */ { 10,  18,   8,  16 },
+        /* 4 (xxx).L  */ { 12,  20,  12,  20 },
+        /* 5 (d16,PC) */ { 10,  18,   8,  16 },
+        /* 6 (d8,PC,X)*/ { 14,  22,  12,  20 },
+        /* 7 other    */ {  8,  16,   4,  12 },
+    };
+    int mode = (ea >> 3) & 7;
+    int reg  =  ea       & 7;
+    int row;
+    switch (mode) {
+    case 2:  row = 0; break;
+    case 5:  row = 1; break;
+    case 6:  row = 2; break;
+    case 7:
+        switch (reg) {
+        case 0:  row = 3; break;
+        case 1:  row = 4; break;
+        case 2:  row = 5; break;
+        case 3:  row = 6; break;
+        default: row = 7; break;
+        }
+        break;
+    default: row = 7; break;
+    }
+    return T[row][col];
+}
+#define EACTL_JMP 0
+#define EACTL_JSR 1
+#define EACTL_LEA 2
+#define EACTL_PEA 3
+
+/* MOVEM addressing-mode surcharge, on top of the direction base and the
+ * per-register term. PRM MOVEM table decomposed as base + this + n-term. */
+static int ea_movem_extra(int ea)
+{
+    int mode = (ea >> 3) & 7;
+    int reg  =  ea       & 7;
+    switch (mode) {
+    case 2: case 3: case 4:  return 0;   /* (An), (An)+, -(An) */
+    case 5:                  return 4;   /* (d16,An)  */
+    case 6:                  return 6;   /* (d8,An,Xn)*/
+    case 7:
+        switch (reg) {
+        case 0: return 4;                /* (xxx).W   */
+        case 1: return 8;                /* (xxx).L   */
+        case 2: return 4;                /* (d16,PC)  */
+        case 3: return 6;                /* (d8,PC,Xn)*/
+        }
+    }
+    return 0;
 }
 
 static int estimate_cycles_prm(const M68KInstr *instr)
 {
-    M68KSize sz     = instr->size;
+    M68KSize sz      = instr->size;
     int      is_long = (sz == M68K_SIZE_L);
-    int      ea_src  = ea_read_cost (instr->src_ea, sz);
-    int      ea_dst  = ea_write_cost(instr->dst_ea, sz);
-    int      dst_mode = (instr->dst_ea >> 3) & 7;
-    int      dst_is_reg = (dst_mode <= 1);
+    /* THE operand EA for every non-MOVE instruction (see decoder contract
+     * above). `ea` is its fetch cost; `op_is_reg` says the operand is a
+     * register rather than memory. */
+    int      ea        = ea_calc_cost(instr->src_ea, sz);
+    int      op_is_reg = ea_is_reg(instr->src_ea);
+    uint16_t w0        = instr->words[0];
 
     switch (instr->mnemonic) {
-    /* ---- Control flow ---- */
+    /* ---- Control flow ------------------------------------------------ */
     case MN_NOP:   return 4;
     case MN_RTS:   return 16;
     case MN_RTE:   return 20;
+    case MN_RTR:   return 20;
     case MN_STOP:  return 4;
-    case MN_JSR:   return 18 + ea_src;        /* PRM Table B-2 */
-    case MN_BSR:   return 18;                 /* .S and .W: 18 */
-    case MN_JMP:   return 10 + ea_src;
-    case MN_BRA:   return 10;                 /* taken */
-    case MN_Bcc:   return 10;                 /* assume taken; PRM: 10 taken / 8 not-taken.W / 12 not-taken.L */
-    case MN_DBcc:  return 12;                 /* avg of 10 (loop-body) / 14 (fall-through) */
+    case MN_JSR:   return ea_control_cost(instr->src_ea, EACTL_JSR);
+    case MN_JMP:   return ea_control_cost(instr->src_ea, EACTL_JMP);
+    case MN_BSR:   return 18;                 /* .S and .W alike */
+    case MN_BRA:   return 10;
+    case MN_Bcc:   return 10;                 /* TAKEN (policy) — untaken is 8 .S / 12 .W */
+    case MN_DBcc:  return 10;                 /* TAKEN (policy) — cc true 12, expired 14 */
 
-    /* ---- Moves ---- */
-    case MN_MOVE:  return 4 + ea_src + ea_dst;
-    case MN_MOVEA: return 4 + ea_src;
+    /* ---- Moves -------------------------------------------------------- */
+    case MN_MOVE:
+        /* Only MOVE/MOVEA populate dst_ea, and the destination uses the
+         * MOVE-specific write table. */
+        return 4 + ea + ea_move_dst_cost(instr->dst_ea, sz);
+    case MN_MOVEA: return 4 + ea;
     case MN_MOVEQ: return 4;
-    case MN_LEA:   return ea_src ? ea_src : 4;  /* PRM: 4..12; Dn/An invalid, abs.L=12 */
-    case MN_PEA:   return 12 + ea_src;
+    case MN_LEA:   return ea_control_cost(instr->src_ea, EACTL_LEA);
+    case MN_PEA:   return ea_control_cost(instr->src_ea, EACTL_PEA);
 
-    /* ---- MOVEM: 12 + 8*n (long) or 8 + 4*n (word); EA cost added.
-     *      Extra 4 cycles for mem→reg (vs reg→mem), averaged into base. */
+    /* ---- MOVEM: direction base + mode surcharge + per-register term ---- */
     case MN_MOVEM: {
-        int nregs = (instr->word_count >= 2) ? popcount16(instr->words[1]) : 4;
-        return (is_long ? 12 + 8*nregs : 8 + 4*nregs) + ea_src;
+        int nregs   = (instr->word_count >= 2) ? popcount16(instr->words[1]) : 4;
+        int mem2reg = (w0 >> 10) & 1;         /* dr bit: 1 = <ea> -> registers */
+        int base    = mem2reg ? 12 : 8;
+        return base + ea_movem_extra(instr->src_ea)
+                    + (is_long ? 8 : 4) * nregs;
     }
 
-    /* ---- Arithmetic / logical (binary) ---- */
-    case MN_ADD: case MN_SUB: case MN_AND: case MN_OR:
-    case MN_EOR: case MN_CMP:
-        /* Dn destination: 4 (B/W) or 6 (L) + ea_src.
-         * Memory destination: 8 (B/W) or 12 (L) + ea_src + ea_dst. */
-        if (dst_is_reg)
-            return (is_long ? 6 : 4) + ea_src;
-        else
-            return (is_long ? 12 : 8) + ea_src + ea_dst;
+    /* ---- Binary arithmetic / logic ------------------------------------ */
+    case MN_ADD: case MN_SUB: case MN_AND: case MN_OR: {
+        /* Direction bit 8: 0 = <ea>,Dn ; 1 = Dn,<ea>. */
+        int to_mem = (w0 >> 8) & 1;
+        if (to_mem)
+            return (is_long ? 12 : 8) + ea;
+        /* <ea>,Dn — long form costs 2 more when the source is a register
+         * or an immediate (PRM footnote). */
+        if (is_long)
+            return (ea_is_reg_or_imm(instr->src_ea) ? 8 : 6) + ea;
+        return 4 + ea;
+    }
 
-    case MN_ADDA: case MN_SUBA: case MN_CMPA:
-        return (is_long ? 6 : 8) + ea_src;
+    case MN_CMP:
+        /* CMP is <ea>,Dn only. */
+        if (is_long)
+            return 6 + ea;
+        return 4 + ea;
+
+    case MN_EOR:
+        /* EOR is Dn,<ea> only. */
+        if (op_is_reg) return is_long ? 8 : 4;
+        return (is_long ? 12 : 8) + ea;
+
+    case MN_ADDA: case MN_SUBA:
+        if (is_long)
+            return (ea_is_reg_or_imm(instr->src_ea) ? 8 : 6) + ea;
+        return 8 + ea;
+
+    case MN_CMPA:
+        return 6 + ea;
 
     case MN_ADDQ: case MN_SUBQ:
-        if (dst_is_reg)
+        if (op_is_reg) {
+            /* An destination is 8 for both word and long (PRM Table 8-8).
+             * DELIBERATE DEVIATION FROM clown68000, which reports 10 here:
+             * Action_ADDQ runs Action_ADD's standard register timing and
+             * then StandardInstructionExecutionTimeQuick adds another 2 for
+             * the An mode (clown68000.c:739), double-charging the surcharge.
+             * The PRM value is 8. */
+            if (((instr->src_ea >> 3) & 7) == 1) return 8;
             return is_long ? 8 : 4;
-        else
-            return (is_long ? 12 : 8) + ea_dst;
+        }
+        return (is_long ? 12 : 8) + ea;
 
     case MN_ADDX: case MN_SUBX:
-        return is_long ? 8 : 4;          /* Dn,Dn; mem variant +12 but rare in Sonic 1 */
+        if (instr->predec_mem_form) return is_long ? 30 : 18;
+        return is_long ? 8 : 4;
 
-    /* ---- Immediate arithmetic ---- */
-    case MN_ADDI: case MN_SUBI: case MN_ANDI: case MN_ORI:
-    case MN_EORI:
-        if (dst_is_reg)
-            return is_long ? 16 : 8;
-        else
-            return (is_long ? 20 : 12) + ea_dst;
+    case MN_CMPM:
+        return is_long ? 20 : 12;
+
+    /* ---- Immediate arithmetic ----------------------------------------- */
+    case MN_ADDI: case MN_SUBI: case MN_ANDI: case MN_ORI: case MN_EORI:
+        if (op_is_reg) return is_long ? 16 : 8;
+        return (is_long ? 20 : 12) + ea;
 
     case MN_CMPI:
-        if (dst_is_reg)
-            return is_long ? 14 : 8;
-        else
-            return (is_long ? 12 : 8) + ea_dst;
+        if (op_is_reg) return is_long ? 14 : 8;
+        return (is_long ? 12 : 8) + ea;
 
-    /* ---- Shifts and rotates ---- */
+    case MN_ORI_TO_CCR:  case MN_ANDI_TO_CCR: case MN_EORI_TO_CCR:
+    case MN_ORI_TO_SR:   case MN_ANDI_TO_SR:  case MN_EORI_TO_SR:
+        return 20;
+
+    /* ---- Shifts and rotates ------------------------------------------- */
     case MN_LSL: case MN_LSR:
     case MN_ASL: case MN_ASR:
     case MN_ROL: case MN_ROR:
     case MN_ROXL: case MN_ROXR: {
-        /* Memory-shift (always 1 bit, always word): 8 + ea_dst. */
-        if (!dst_is_reg)
-            return 8 + ea_dst;
-        /* Register-shift: base 6 (B/W) or 8 (L), + 2*count.
-         * Count comes from bits 11:9 of words[0] when bit 5 is clear
-         * (immediate mode); when bit 5 is set, count is in Dn and
-         * we use an average (4 shifts). */
-        uint16_t w0 = instr->words[0];
+        /* Memory form: always one bit, always a word operand. */
+        if (instr->mem_shift) return 8 + ea;
+        /* Register form: base + 2 per bit shifted. Bit 5 selects a
+         * register count, which is not statically knowable — policy is an
+         * average of 4 (see the header comment). */
         int reg_count_mode = (w0 >> 5) & 1;
         int n;
         if (reg_count_mode) {
-            n = 4;   /* data-dependent avg */
+            n = 4;
         } else {
             n = (w0 >> 9) & 7;
             if (n == 0) n = 8;
@@ -1889,82 +2040,104 @@ static int estimate_cycles_prm(const M68KInstr *instr)
         return (is_long ? 8 : 6) + 2 * n;
     }
 
-    /* ---- Multiply / divide (data-dependent; lean toward PRM midpoint) ---- */
-    case MN_MULS: return 70;    /* PRM: 38n + 38 worst case */
-    case MN_MULU: return 70;    /* PRM: 38 min, 70 max */
-    case MN_DIVS: return 150;   /* PRM: 158 worst case */
-    case MN_DIVU: return 140;   /* PRM: 140 worst case */
+    /* ---- Multiply / divide (data-dependent; documented policy) --------- */
+    case MN_MULU: case MN_MULS: return 38 + 2 * 8 + ea;   /* average operand */
+    case MN_DIVU:               return 140 + ea;
+    case MN_DIVS:               return 158 + ea;
 
-    /* ---- Unary ---- */
+    /* ---- Unary --------------------------------------------------------- */
     case MN_TST:
+        /* TST does not write back: 4 + EA, no RMW surcharge. */
+        if (op_is_reg) return 4;
+        return 4 + ea;
+
     case MN_CLR:
     case MN_NEG: case MN_NEGX: case MN_NOT:
-        if (dst_is_reg)
-            return is_long ? 6 : 4;
-        else
-            return (is_long ? 12 : 8) + ea_dst;
+        if (op_is_reg) return is_long ? 6 : 4;
+        return (is_long ? 12 : 8) + ea;
 
-    case MN_NBCD: return dst_is_reg ? 6  : 8  + ea_dst;
-    case MN_TAS:  return dst_is_reg ? 4  : 14 + ea_dst;
+    case MN_NBCD: return op_is_reg ? 6  : 8  + ea;
+    case MN_TAS:  return op_is_reg ? 4  : 14 + ea;
 
-    /* ---- Sign extension ---- */
+    /* ---- Sign extension ------------------------------------------------ */
     case MN_EXT:  return 4;
     case MN_SWAP: return 4;
 
-    /* ---- Bit instructions ---- */
-    case MN_BTST:
-        /* Dn dst = 6 (imm) or 6 (dyn); mem dst = 4 + ea_dst. */
-        return dst_is_reg ? 6 : (4 + ea_dst);
-    case MN_BCHG: case MN_BCLR:
-        return dst_is_reg ? 8 : (8 + ea_dst);
-    case MN_BSET:
-        return dst_is_reg ? 8 : (8 + ea_dst);
+    /* ---- Bit instructions ----------------------------------------------
+     * Static (#imm) forms cost more on a register than the dynamic (Dn)
+     * forms. Bit 8 of the opcode distinguishes them: set = dynamic. */
+    case MN_BTST: {
+        int dynamic = (w0 >> 8) & 1;
+        if (op_is_reg) return dynamic ? 6 : 10;
+        return (dynamic ? 4 : 8) + ea;
+    }
+    case MN_BCHG: case MN_BSET: case MN_BCLR: {
+        int dynamic = (w0 >> 8) & 1;
+        int is_bclr = (instr->mnemonic == MN_BCLR);
+        if (op_is_reg) {
+            /* Dn destination = a 32-bit operand. The 68000's 16-bit ALU only
+             * has to touch the low word when the bit number is < 16, which
+             * costs 2 cycles less. For the STATIC form the bit number is an
+             * immediate in the extension word, so this is exactly knowable
+             * at codegen time; for the DYNAMIC form it is a runtime register
+             * and we hold the PRM high-word value. */
+            if (dynamic) return is_bclr ? 10 : 8;
+            int low_bit = (instr->imm32 & 31u) < 16u;
+            if (is_bclr) return low_bit ? 12 : 14;
+            return low_bit ? 10 : 12;
+        }
+        /* Memory destination is a BYTE operand — no high/low-word split.
+         * Static (#imm) forms cost 12+EA, not 8+EA: the extension word
+         * carrying the bit number is an extra prefetch. */
+        return (dynamic ? 8 : 12) + ea;
+    }
 
-    /* ---- Link / Unlink ---- */
+    /* ---- Link / Unlink -------------------------------------------------- */
     case MN_LINK: return 16;
     case MN_UNLK: return 12;
 
-    /* ---- Conditional set ---- */
+    /* ---- Conditional set ------------------------------------------------ */
     case MN_Scc:
-        return dst_is_reg ? 6 : (8 + ea_dst);
+        if (op_is_reg) return 6;              /* TRUE (policy); false is 4 */
+        return 8 + ea;
 
-    /* ---- Traps / priv ---- */
+    /* ---- Traps / privileged --------------------------------------------- */
     case MN_TRAP:    return 34;
-    case MN_TRAPV:   return 4;             /* untaken; taken adds vector cost */
-    case MN_CHK:     return 10 + ea_src;   /* no-trap path */
-    case MN_RTR:     return 20;
-    case MN_RESET:   return 132;           /* PRM: 132 cycles, mostly /RESET pulse */
-    case MN_ILLEGAL: return 34;            /* same as TRAP */
+    case MN_TRAPV:   return 4;                /* untaken */
+    case MN_CHK:     return 10 + ea;          /* no-trap path */
+    case MN_RESET:   return 132;
+    case MN_ILLEGAL: return 34;
 
-    /* ---- BCD ---- */
+    /* ---- BCD ------------------------------------------------------------ */
     case MN_ABCD: case MN_SBCD:
-        return 6;    /* Dn,Dn (mem variant 18, rare) */
+        return instr->predec_mem_form ? 18 : 6;
 
-    /* ---- Misc ---- */
+    /* ---- Misc ------------------------------------------------------------ */
     case MN_EXG:       return 6;
     case MN_MOVE_USP:  return 4;
-    case MN_MOVE_SR:   return dst_is_reg ? 6 : (8 + ea_dst);
-    case MN_MOVE_CCR:  return 12 + ea_src;
+    case MN_MOVEC:     return 12;             /* 68010+; not reachable on 68000 */
+    case MN_MOVE_SR:
+        /* MOVE SR,<ea> writes; MOVE <ea>,SR reads. */
+        if (instr->dst_is_ea)
+            return op_is_reg ? 6 : (8 + ea);
+        return 12 + ea;
+    case MN_MOVE_CCR:
+        return 12 + ea;                       /* MOVE <ea>,CCR (68000 has no MOVE CCR,<ea>) */
     case MN_MOVEP:     return is_long ? 24 : 16;
 
     case MN_OTHER:
     default:
-        /* Fallback: base 4 + EA costs. Keeps behavior reasonable on
-         * opcodes that haven't been tuned above. */
-        return 4 + ea_src + ea_dst;
+        /* Unmodelled opcode: base 4 plus whatever operand fetch the
+         * decoder did identify. */
+        return 4 + ea;
     }
 }
 
-/* Primary cycle-cost entry point. Asks the clown68000 interpreter (via
- * cycle_probe) for the exact cost; falls back to the PRM-derived table
- * above if the probe isn't initialised (e.g. unit-test paths) or if
- * clown returned an unreasonable value. */
-/* Per-address record of the EXACT cost the generated code was stamped with
- * (clown-measured, or PRM fallback). Emitted as <prefix>_cycles.c so the
- * runtime interpreter / Tier-3 floor can charge the SAME cost the recompiled
- * code does — otherwise the interp (PRM estimate) and recomp (clown-measured)
- * disagree on g_audio_cycle_counter, which drives audio-stamp pacing. Indexed
- * by addr>>1 (68K instructions are word-aligned); 0 = not recorded. */
+/* Per-address record of the EXACT cost the generated code was stamped with.
+ * Emitted as <prefix>_cycles.c so the Tier-3 interpreter floor charges the
+ * SAME cost the recompiled code does — otherwise the two disagree on
+ * g_audio_cycle_counter, which drives audio-stamp pacing. Indexed by addr>>1
+ * (68K instructions are word-aligned); 0 = not recorded. */
 static uint16_t *g_insn_cost_by_addr = NULL;   /* [0x200000] */
 static void insn_cost_record(uint32_t addr, int cost) {
     if (!g_insn_cost_by_addr)
@@ -1975,9 +2148,9 @@ static void insn_cost_record(uint32_t addr, int cost) {
 /* Emit the sorted (addr,cost) table (called from main after codegen). */
 void emit_insn_cost_table(FILE *f) {
     fprintf(f, "/* AUTO-GENERATED per-instruction cycle costs — do not edit.\n"
-               " * The EXACT costs the recompiled code was stamped with (clown-\n"
-               " * measured via cycle_probe, or PRM fallback). game_cycles.c looks\n"
-               " * these up so the interpreter/floor pace identically. */\n");
+               " * The EXACT costs the recompiled code was stamped with by the\n"
+               " * clean-room timing model. game_cycles.c looks these up so the\n"
+               " * Tier-3 interpreter floor paces identically. */\n");
     fprintf(f, "#include \"game_cycles.h\"\n\n");
     fprintf(f, "const GameInsnCost g_game_insn_costs[] = {\n");
     size_t n = 0;
@@ -1992,14 +2165,46 @@ void emit_insn_cost_table(FILE *f) {
     fprintf(f, "\n};\nconst size_t g_game_insn_cost_count = %zuu;\n", n);
 }
 
+/* --- Cycle-model census (always available, opt-in at runtime) -------------
+ * Set GENESIS_CYCLE_DIAG=<path> to have every estimate_cycles() call append
+ * one CSV row. The recompiler already visits every instruction, so the log is
+ * a complete census of the codegen run rather than a sampled window — no
+ * arming, no timing window to miss.
+ *
+ * Columns: addr,opcode,mnemonic,size,cost -- cost is what was emitted.
+ * Diffing two censuses is how a change to the timing model is reviewed now
+ * that there is no interpreter to compare against. The census never
+ * influences the emitted cost, so enabling it cannot change generated code. */
+static FILE *g_cycle_diag_f    = NULL;
+static int   g_cycle_diag_init = 0;
+
+static FILE *cycle_diag_file(void)
+{
+    if (!g_cycle_diag_init) {
+        const char *path = getenv("GENESIS_CYCLE_DIAG");
+        g_cycle_diag_init = 1;
+        if (path && *path) {
+            g_cycle_diag_f = fopen(path, "w");
+            if (g_cycle_diag_f)
+                fprintf(g_cycle_diag_f, "addr,opcode,mnemonic,size,cost\n");
+        }
+    }
+    return g_cycle_diag_f;
+}
+
+/* Sole cycle-cost entry point. The clean-room model IS the cost, so codegen is
+ * deterministic and reproducible from the ROM and config alone. */
 static int estimate_cycles(const M68KInstr *instr)
 {
-    int measured = cycle_probe_measure(instr->addr);
-    /* Guard: any positive value within a sane range wins. Outside that
-     * range, fall back — clown returned <=0 (not initialised) or some
-     * absurd count (illegal opcode trap path, etc). */
-    int cost = (measured > 0 && measured <= 300) ? measured
-                                                 : estimate_cycles_prm(instr);
+    int cost = estimate_cycles_prm(instr);
+
+    FILE *diag = cycle_diag_file();
+    if (diag) {
+        fprintf(diag, "0x%06X,0x%04X,%d,%d,%d\n",
+                instr->addr, instr->words[0], (int)instr->mnemonic,
+                (int)instr->size, cost);
+    }
+
     insn_cost_record(instr->addr, cost);
     return cost;
 }
@@ -2302,7 +2507,13 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             break;
         }
 
-        /* Simulate JSR/BSR stack: push return address onto the 68K stack. */
+        /* Simulate JSR/BSR stack: push return address onto the 68K stack.
+         * Remember the pre-call SP so a normal return can be checked before
+         * this wrapper removes the return slot.  A callee that returns
+         * normally must leave A7 at exactly pre_sp - 4; anything else means
+         * the generated C call/return model has lost the 68K stack contract
+         * and continuing would turn saved registers into dispatch targets. */
+        fprintf(f, "  uint32_t _jsr_sp_%06X = g_cpu.A[7];\n", addr);
         fprintf(f, "  recomp_push_return(0x%06Xu); /* JSR push */\n", ret_addr);
 
         if (instr->has_target) {
@@ -2328,6 +2539,32 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                                 func_name, func_addr);
             fprintf(f, "  /* TODO: dynamic JSR/BSR EA %d/%d */\n", mode, reg);
         }
+
+        /* The flat-call backend intentionally permits guest stack idioms used
+         * by legacy titles (notably Sonic's sound driver), so exact wrapper
+         * balance is a focused diagnostic rather than a production invariant. */
+        fprintf(f,
+                "  if (!g_rte_pending && g_cpu.A[7] != "
+                "(uint32_t)(_jsr_sp_%06X - 4u) && "
+                "getenv(\"GENESIS_STRICT_JSR_STACK\")) {\n",
+                addr);
+        if (instr->has_target) {
+            fprintf(f,
+                    "    fprintf(stderr, \"JSR stack mismatch at $%06X -> "
+                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
+                    "_jsr_sp_%06X, g_cpu.A[7], "
+                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    addr, bsr_target, addr, addr);
+        } else {
+            fprintf(f,
+                    "    fprintf(stderr, \"dynamic JSR stack mismatch at "
+                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
+                    "_jsr_sp_%06X, g_cpu.A[7], "
+                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    addr, addr, addr);
+        }
+        fprintf(f, "    exit(3);\n");
+        fprintf(f, "  }\n");
 
         /* Pop return address from 68K stack.
          * Check g_rte_pending BEFORE the pop: when the callee used the
@@ -2404,7 +2641,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: in-function dispatch — base $%06X + %s[%d], %d targets (Duff's device) */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg, npc);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  switch ((int16_t)%s[%d]) {\n", xr, xreg);
+                fprintf(f, "  switch ((int32_t)m68k_brief_index_value(0x%04Xu, "
+                        "g_cpu.D[%d], g_cpu.A[%d])) {\n", ext, xreg, xreg);
                 { int32_t seen_offsets[512]; int seen_count = 0;
                   for (int t = 0; t < npc; t++) {
                     int32_t off = (int32_t)(pc_targets[t] - base);
@@ -2414,8 +2652,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     seen_offsets[seen_count++] = off;
                     fprintf(f, "    case %d: goto label_%06X;\n", off, pc_targets[t]);
                 } }
-                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]); return;\n",
-                        base, xr, xreg);
+                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d])); return;\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  }\n");
             } else if (not_ >= 1) {
                 /* Case (b): offset-table dispatch — `dc.w (target - base)`
@@ -2428,7 +2667,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: in-function dispatch — base $%06X + %s[%d], %d targets (offset table) */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg, not_);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  switch ((int16_t)%s[%d]) {\n", xr, xreg);
+                fprintf(f, "  switch ((int32_t)m68k_brief_index_value(0x%04Xu, "
+                        "g_cpu.D[%d], g_cpu.A[%d])) {\n", ext, xreg, xreg);
                 { int seen_offsets[512]; int seen_count = 0;
                   for (int t = 0; t < not_; t++) {
                     int dup = 0;
@@ -2438,8 +2678,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     fprintf(f, "    case %d: goto label_%06X;\n",
                             ot_offsets[t], ot_targets[t]);
                 } }
-                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]); return;\n",
-                        base, xr, xreg);
+                fprintf(f, "    default: hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d])); return;\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  }\n");
             } else {
                 /* Case (c): nothing recognised — fall back to runtime dispatch. */
@@ -2448,8 +2689,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  /* JMP table at $%06X: interpret handler at base $%06X + %s[%d] */\n",
                         instr->addr, base, xr + 6 /* skip "g_cpu." */, xreg);
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-                fprintf(f, "  hybrid_jmp_interpret(0x%08Xu + (uint32_t)(int16_t)%s[%d]);\n",
-                        base, xr, xreg);
+                fprintf(f, "  hybrid_jmp_interpret(0x%08Xu + "
+                        "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]));\n",
+                        base, ext, xreg, xreg);
                 fprintf(f, "  return;\n");
             }
         } else {
@@ -2676,6 +2918,12 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             /* Update N,Z; clear V,C */
             emit_flags_logic(f, src_expr, sz);
         }
+        if (*has_sp_adjust && sz == M68K_SIZE_L) {
+            if (src_ea == ((EA_An_POST << 3) | 7))
+                fprintf(f, "  _sp_popped += 1; /* MOVE.L (SP)+ */\n");
+            if (dst_ea == ((EA_An_PRE << 3) | 7))
+                fprintf(f, "  _sp_popped -= 1; /* MOVE.L -(SP) */\n");
+        }
         break;
     }
 
@@ -2689,6 +2937,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         } else {
             fprintf(f, "  g_cpu.A[%d] = (uint32_t)(%s);\n", areg, src_expr);
         }
+        if (*has_sp_adjust && sz == M68K_SIZE_L
+                && instr->src_ea == ((EA_An_POST << 3) | 7))
+            fprintf(f, "  _sp_popped += 1; /* MOVEA.L (SP)+ */\n");
         break;
     }
 
@@ -2704,6 +2955,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
     case MN_PEA: {
         emit_ea_addr(f, instr, instr->src_ea, &er, addr_expr);
         fprintf(f, "  g_cpu.A[7] -= 4; m68k_write32(g_cpu.A[7], %s);\n", addr_expr);
+        if (*has_sp_adjust)
+            fprintf(f, "  _sp_popped -= 1; /* PEA pushes one longword */\n");
         break;
     }
 
@@ -3531,12 +3784,11 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         case 6: {
             uint16_t ext = er_next(&er2);
             int xreg  = (ext >> 12) & 7;
-            int xtype = (ext >> 15) & 1;
             int8_t d8 = (int8_t)(ext & 0xFF);
-            const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
             snprintf(base_expr, sizeof(base_expr),
-                     "(uint32_t)(g_cpu.A[%d] + (int32_t)(int16_t)%s[%d] + (%d))",
-                     reg, xr, xreg, (int)d8);
+                     "(uint32_t)(g_cpu.A[%d] + "
+                     "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                     reg, ext, xreg, xreg, (int)d8);
             break;
         }
         case 7:
@@ -3566,12 +3818,11 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 uint32_t pc_addr = instr->addr + er2.bp;
                 uint16_t ext = er_next(&er2);
                 int xreg  = (ext >> 12) & 7;
-                int xtype = (ext >> 15) & 1;
                 int8_t d8 = (int8_t)(ext & 0xFF);
-                const char *xr = xtype ? "g_cpu.A" : "g_cpu.D";
                 snprintf(base_expr, sizeof(base_expr),
-                         "(uint32_t)(0x%08X + (int32_t)(int16_t)%s[%d] + (%d))",
-                         pc_addr, xr, xreg, (int)d8);
+                         "(uint32_t)(0x%08X + "
+                         "m68k_brief_index_value(0x%04Xu, g_cpu.D[%d], g_cpu.A[%d]) + (%d))",
+                         pc_addr, ext, xreg, xreg, (int)d8);
                 break;
             }
             default:
@@ -3664,6 +3915,18 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "    g_cpu.A[%d] = _mbase; }\n", reg);
             else
                 fprintf(f, "  }\n");
+        }
+        if (*has_sp_adjust && sz == M68K_SIZE_L && reg == 7) {
+            int reg_count = 0;
+            for (int bit = 0; bit < 16; bit++)
+                if (mask & (1u << bit))
+                    reg_count++;
+            if (dir == 1 && mode == 3)
+                fprintf(f, "  _sp_popped += %d; /* MOVEM.L (SP)+ */\n",
+                        reg_count);
+            else if (dir == 0 && mode == 4)
+                fprintf(f, "  _sp_popped -= %d; /* MOVEM.L -(SP) */\n",
+                        reg_count);
         }
         break;
     }
@@ -4202,6 +4465,8 @@ static void emit_decls_preamble(FILE *f) {
     fprintf(f, " * translation units (see cmake/GenesisRecompGenerated.cmake). */\n");
     fprintf(f, "#include \"genesis_runtime.h\"\n");
     fprintf(f, "#include \"game_extras.h\"\n");
+    fprintf(f, "#include <stdio.h>\n");
+    fprintf(f, "#include <stdlib.h>\n");
     if (s_reverse_debug) {
         /* Pull in the reverse-debugger API: g_rdb_current_func extern
          * (Tier 1) and rdb_on_block inline fast path (Tier 2). Header
@@ -4626,8 +4891,12 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             }
         }
 
-        /* Pre-scan: check if any instruction is ADDQ/ADDA to A7 (sp).
-         * If so, emit a local _sp_popped variable for early-exit tracking. */
+        /* Pre-scan for instructions that can change A7 by whole longwords.
+         * `_sp_popped` tracks the path-local net delta.  Besides explicit
+         * ADDQ stack skips, this must include MOVE/MOVEM postincrement pops:
+         * a helper may consume its JSR return slot on only one branch, which
+         * cannot be classified as either an ordinary or an unconditional
+         * return-capturing callee at the call site. */
         int has_sp_adjust = 0;
         for (int j = 0; j < instrs.count; j++) {
             M68KInstr pre;
@@ -4638,10 +4907,38 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                     has_sp_adjust = 1;
                     break;
                 }
+                if (pre.size == M68K_SIZE_L
+                        && (pre.mnemonic == MN_MOVE || pre.mnemonic == MN_MOVEA)
+                        && pre.src_ea == ((EA_An_POST << 3) | 7)) {
+                    has_sp_adjust = 1;
+                    break;
+                }
+                if (pre.size == M68K_SIZE_L && pre.mnemonic == MN_MOVE
+                        && pre.dst_ea == ((EA_An_PRE << 3) | 7)) {
+                    has_sp_adjust = 1;
+                    break;
+                }
+                if (pre.size == M68K_SIZE_L && pre.mnemonic == MN_MOVEM) {
+                    int dir = (pre.words[0] >> 10) & 1;
+                    int mode = (pre.src_ea >> 3) & 7;
+                    int reg = pre.src_ea & 7;
+                    if (reg == 7
+                            && ((dir == 1 && mode == 3)
+                                || (dir == 0 && mode == 4))) {
+                        has_sp_adjust = 1;
+                        break;
+                    }
+                }
             }
         }
-        if (has_sp_adjust)
-            fprintf(f_func, "  int _sp_popped = 0;\n");
+        if (has_sp_adjust) {
+            /* A generated split-function tail call is one 68K control-flow
+             * path, not a real JSR boundary.  Consume its carried net stack
+             * delta into this function's path-local accounting before any
+             * MOVEM/ADDQ adjustment changes it. */
+            fprintf(f_func, "  int _sp_popped = g_split_sp_popped;\n");
+            fprintf(f_func, "  g_split_sp_popped = 0;\n");
+        }
 
         /* TEMPORARY debug counters for VBla chain tracing */
         if (func_addr == 0x000B64)

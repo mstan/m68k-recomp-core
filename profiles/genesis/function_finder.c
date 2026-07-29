@@ -19,6 +19,7 @@
 #include "m68k_validator.h"
 #include "rom_parser.h"
 #include "game_config.h"
+#include "return_capture.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,7 @@ static int s_jt_bounded_promotions    = 0;  /* explicit abs-table entries >64 */
  * gated additive promotions (long tables beyond the static cap, JSR tables). */
 static int s_jt_jsr_word_tables       = 0;  /* word-offset jsr tables found    */
 static int s_jt_runtime_promotions    = 0;  /* targets added via runtime oracle */
+static int s_function_pointer_edges   = 0;  /* configured helper edges matched  */
 
 /* Per-site record for every dispatch we couldn't enumerate. Dumped to
  * <diagnostics_dir>/<prefix>.unresolved_jumptables.log so the user can grep
@@ -599,45 +601,58 @@ static bool function_captures_return_addr(const GenesisRom *rom, uint32_t start)
     return false;
 }
 
-/* Strict variant used by the code generator (NOT discovery).
+/* Some games pass an object/state handler to a helper in A1:
  *
- * Returns true only if the routine UNCONDITIONALLY pops its own return
- * address off the stack at entry — the Obj_WaitOffscreen idiom
- * (`move.l (sp)+,$34(a0)`): the routine saves the return PC as an object
- * code pointer and redirects control, so its eventual rts returns to the
- * caller of the `jsr`, never to the instruction after it. The generator
- * turns `jsr <such routine>` into a non-returning tail transfer (no second
- * stack pop, no fall-through to the post-jsr address).
+ *     lea     Handler.l,a1
+ *     bsr.w   AllocateObject
  *
- * Stricter than function_captures_return_addr(): it also bails on any
- * conditional branch (Bcc/DBcc) before the pop, so a routine that only
- * pops its return on SOME path is never mis-treated as always-redirecting.
- * Discovery keeps the looser heuristic; only emission uses this one. */
-bool function_finder_pops_return_unconditionally(const GenesisRom *rom, uint32_t start) {
-    uint32_t pc = start;
-    for (int n = 0; n < 12 && pc + 1 < rom->rom_size; n++) {
-        M68KInstr ins;
-        if (!m68k_decode(rom, pc, &ins)) return false;
-        /* Longword pop from (a7)+ reached with no intervening control flow
-         * or stack growth == the return address being consumed. */
-        if ((ins.mnemonic == MN_MOVE || ins.mnemonic == MN_MOVEA)
-                && ins.size == M68K_SIZE_L
-                && ins.src_ea == ((3 << 3) | 7))            /* (a7)+ */
-            return true;
-        /* Anything that pushes, calls, branches (conditional or not), or
-         * terminates before the pop makes the entry pop non-guaranteed. */
-        if (ins.dst_ea == ((4 << 3) | 7)                    /* -(a7) dest */
-                || ins.mnemonic == MN_PEA
-                || ins.mnemonic == MN_LINK
-                || ins.mnemonic == MN_MOVEM
-                || ins.mnemonic == MN_Bcc
-                || ins.mnemonic == MN_DBcc
-                || m68k_is_call(&ins)
-                || m68k_is_terminator(&ins))
-            return false;
-        pc += ins.byte_length;
+ * The call target alone says nothing about A1, so ordinary control-flow
+ * discovery cannot see Handler. A per-game `function_pointer_helpers` entry
+ * supplies the missing helper semantics. Keep the syntactic side deliberately
+ * strict: the load must be immediately before the configured direct call, use
+ * A1, and contain an absolute ROM address. */
+static bool configured_function_pointer_edge(const GameConfig *cfg,
+                                             const M68KInstr *load,
+                                             uint32_t helper,
+                                             uint32_t rom_size,
+                                             uint32_t *target_out) {
+    if (!cfg || !load || !target_out) return false;
+    bool configured = false;
+    for (int i = 0; i < cfg->function_pointer_helper_count; i++) {
+        if (cfg->function_pointer_helpers[i] == helper) {
+            configured = true;
+            break;
+        }
     }
-    return false;
+    if (!configured || load->reg != 1) return false; /* destination A1 */
+
+    int mode = (load->src_ea >> 3) & 7;
+    int reg  = load->src_ea & 7;
+    uint32_t target;
+    if (load->mnemonic == MN_LEA
+            && mode == EA_PCR && reg == PCR_ABS_L
+            && load->word_count >= 3) {
+        target = ((uint32_t)load->words[1] << 16) | load->words[2];
+    } else if (load->mnemonic == MN_MOVEA
+            && load->size == M68K_SIZE_L
+            && mode == EA_PCR && reg == PCR_IMM
+            && load->word_count >= 3) {
+        target = ((uint32_t)load->words[1] << 16) | load->words[2];
+    } else {
+        return false;
+    }
+    if ((target & 1) || target >= rom_size) return false;
+    *target_out = target;
+    return true;
+}
+
+/* Strict all-path proof used by the code generator (NOT discovery).
+ *
+ * Unlike the loose discovery heuristic above, this succeeds only when every
+ * reachable path consumes the return address before returning. Conditional
+ * helpers are supported when all branches satisfy that requirement. */
+bool function_finder_pops_return_unconditionally(const GenesisRom *rom, uint32_t start) {
+    return m68k_return_capture_is_unconditional(rom, start);
 }
 
 void function_finder_run(const GenesisRom *rom, FunctionList *list,
@@ -655,6 +670,7 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
     s_jt_twostep_sites    = 0;
     s_jt_twostep_tables   = 0;
     s_jt_bounded_promotions = 0;
+    s_function_pointer_edges = 0;
     /* Reuse the unresolved-site buffer across runs but reset its
      * logical length. Capacity is preserved so the next run avoids
      * re-allocating from scratch. */
@@ -726,13 +742,26 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
             if (m68k_is_call(&instr) && instr.has_target
                     && !game_config_is_blacklisted(cfg, instr.target_addr)) {
                 add_function(list, instr.target_addr);
+                uint32_t pointer_target;
+                if (have_prev && configured_function_pointer_edge(
+                        cfg, &prev_instr, instr.target_addr,
+                        rom->rom_size, &pointer_target)
+                        && !game_config_is_blacklisted(cfg, pointer_target)) {
+                    add_function(list, pointer_target);
+                    s_function_pointer_edges++;
+                }
                 /* If the callee captures its return address off the stack and
                  * repurposes it as a code pointer (Obj_WaitOffscreen idiom),
                  * the return address is a live dispatch entry — register it.
                  * add_function code-gates it, so data return addresses (e.g.
                  * inline-parameter callees) are rejected. */
-                if (discovery_phase == 0
-                        && function_captures_return_addr(rom, instr.target_addr))
+                /* This semantic edge is equally valid during the audited
+                 * late-root phase. Late roots deliberately disable speculative
+                 * table discovery, but a direct call to a return-capturing
+                 * helper proves that its continuation is a future indirect
+                 * entry. Keeping this phase-gated made state machines rooted
+                 * via late_extra lose their next-state entries. */
+                if (function_captures_return_addr(rom, instr.target_addr))
                     add_function(list, pc + instr.byte_length);
             }
 
@@ -1025,6 +1054,8 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
            "tables_enumerated=%d bounded_promotions=%d\n",
            s_jt_twostep_sites, s_jt_twostep_tables,
            s_jt_bounded_promotions);
+    printf("[FunctionFinder] Configured function-pointer helper edges: %d\n",
+           s_function_pointer_edges);
     printf("[FunctionFinder] JSR (d8,PC,Xn) word-offset call tables: %d; "
            "runtime-oracle additive promotions: %d\n",
            s_jt_jsr_word_tables, s_jt_runtime_promotions);
