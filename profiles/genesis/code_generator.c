@@ -277,28 +277,45 @@ static const WsSite *ws_site_for_kind(uint32_t addr, WsSiteKind k0, WsSiteKind k
  * the word `base` bytes after the source operand (camera min-bound clamp:
  * (a2) = Camera_Min_X_pos, cap = Camera_Max_X_pos at +2; never below the
  * original value either, so a boss lock with Min == Max stays authentic).
- * Only word-size with an (An) source is supported — anything else gets a
- * diagnostic and no wrapper. Returns 1 and writes the wrapped C expression
- * into `out` when emitted; returns 0 otherwise (caller keeps src_expr).
+ * Word-size (An) and abs.W sources are supported (abs.W: the player
+ * level-bound reads `move.w (Camera_Min_X_pos).w,d0` — cap address is the
+ * absolute word + base) — anything else gets a diagnostic and no wrapper.
+ * Returns 1 and writes the wrapped C expression into `out` when emitted;
+ * returns 0 otherwise (caller keeps src_expr).
  * margin 0 => the wrapper leaves the value untouched (identical behavior). */
 static int ws_emit_addmem_wrap(FILE *f, const WsSite *site, uint32_t addr,
-                               int src_ea, M68KSize sz,
+                               const M68KInstr *instr, int src_ea, M68KSize sz,
                                const char *src_expr, char *out, size_t outsz)
 {
     int smode = (src_ea >> 3) & 7;
     int sreg  = src_ea & 7;
-    if (smode != 2 || sz != M68K_SIZE_W) {
-        fprintf(stderr, "[widescreen] addmem @%06X: only word-size (An) "
-                "sources are supported — site ignored\n", addr);
+    int is_absw = (smode == 7 && sreg == 0);
+    if ((smode != 2 && !is_absw) || sz != M68K_SIZE_W) {
+        fprintf(stderr, "[widescreen] addmem @%06X: only word-size (An) or "
+                "abs.W sources are supported — site ignored\n", addr);
         return 0;
     }
-    fprintf(f, "  /* [widescreen] addmem: src + (g_ws_margin>>%u)%s */\n",
-            site->shift, site->base ? ", capped" : "");
+    fprintf(f, "  /* [widescreen] addmem: src + (g_ws_margin>>%u)%s%s */\n",
+            site->shift, site->base ? ", capped" : "",
+            site->gate ? ", gated" : "");
     fprintf(f, "  uint16_t _wsv%06X = (uint16_t)(%s);\n", addr, src_expr);
-    fprintf(f, "  if (g_ws_margin) {\n");
+    if (site->gate)
+        /* gate: widen only while the RAM byte reads 0 (e.g. the game's
+         * boss-active flag — boss arenas keep the authentic playfield) */
+        fprintf(f, "  if (g_ws_margin && m68k_read8(0x%08Xu) == 0) {\n",
+                site->gate);
+    else
+        fprintf(f, "  if (g_ws_margin) {\n");
     fprintf(f, "    uint32_t _wsc = (uint32_t)_wsv%06X + (uint32_t)(g_ws_margin >> %u);\n",
             addr, site->shift);
-    if (site->base) {
+    if (site->base && is_absw) {
+        /* abs.W source: ext word 1 holds the sign-extended operand address */
+        uint32_t absaddr = (uint32_t)(int32_t)(int16_t)instr->words[1];
+        fprintf(f, "    uint16_t _wscap = m68k_read16(0x%08Xu);\n",
+                absaddr + (uint32_t)site->base);
+        fprintf(f, "    if (_wsc > (uint32_t)_wscap) _wsc = _wscap;\n");
+        fprintf(f, "    if (_wsc < (uint32_t)_wsv%06X) _wsc = _wsv%06X;\n", addr, addr);
+    } else if (site->base) {
         fprintf(f, "    uint16_t _wscap = m68k_read16((uint32_t)(g_cpu.A[%d] + %uu));\n",
                 sreg, (unsigned)site->base);
         fprintf(f, "    if (_wsc > (uint32_t)_wscap) _wsc = _wscap;\n");
@@ -2634,7 +2651,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
          * capped value the paired cmp addmem compared against). */
         const WsSite *_wsam = ws_site_for_kind(addr, WS_SITE_ADDMEM, WS_SITE_ADDMEM);
         char wsmv[64];
-        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, src_ea, sz,
+        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, instr, src_ea, sz,
                                          src_expr, wsmv, sizeof(wsmv))) {
             emit_ea_store(f, instr, dst_ea, sz, &er_dst, wsmv);
             emit_flags_logic(f, wsmv, sz);
@@ -2899,7 +2916,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         char wsv[64];
         const char *csrc = src_expr;
         const WsSite *_wsam = ws_site_for_kind(addr, WS_SITE_ADDMEM, WS_SITE_ADDMEM);
-        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, instr->src_ea, sz,
+        if (_wsam && ws_emit_addmem_wrap(f, _wsam, addr, instr, instr->src_ea, sz,
                                          src_expr, wsv, sizeof(wsv)))
             csrc = wsv;
         char res[64];
