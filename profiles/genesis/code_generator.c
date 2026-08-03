@@ -2507,14 +2507,12 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             break;
         }
 
-        /* Simulate JSR/BSR stack: push return address onto the 68K stack.
-         * Remember the pre-call SP so a normal return can be checked before
-         * this wrapper removes the return slot.  A callee that returns
-         * normally must leave A7 at exactly pre_sp - 4; anything else means
-         * the generated C call/return model has lost the 68K stack contract
-         * and continuing would turn saved registers into dispatch targets. */
-        fprintf(f, "  uint32_t _jsr_sp_%06X = g_cpu.A[7];\n", addr);
+        /* Simulate JSR/BSR stack: push the return address, then remember the
+         * actual slot address. recomp_push_return() may first canonicalize a
+         * sign-extended A7 to the Genesis' 24-bit RAM address. */
+        fprintf(f, "  uint32_t _jsr_pre_sp_%06X = g_cpu.A[7];\n", addr);
         fprintf(f, "  recomp_push_return(0x%06Xu); /* JSR push */\n", ret_addr);
+        fprintf(f, "  uint32_t _jsr_slot_sp_%06X = g_cpu.A[7];\n", addr);
 
         if (instr->has_target) {
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
@@ -2540,29 +2538,27 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             fprintf(f, "  /* TODO: dynamic JSR/BSR EA %d/%d */\n", mode, reg);
         }
 
-        /* A normal callee leaves this wrapper's return slot at pre_sp - 4.
-         * A nested skip-return may consume that slot before unwinding its
-         * generated C frames, leaving A7 back at pre_sp; that is also valid
-         * and the wrapper must not synthesize a second pop below. */
+        /* A normal callee leaves this wrapper's return slot in place. A nested
+         * skip-return may consume it before unwinding its generated C frames,
+         * leaving A7 at slot_sp + 4; that is also valid and the wrapper must
+         * not synthesize a second pop below. */
         fprintf(f,
                 "  if (!g_rte_pending && g_cpu.A[7] != "
-                "(uint32_t)(_jsr_sp_%06X - 4u) && "
-                "g_cpu.A[7] != _jsr_sp_%06X && "
+                "_jsr_slot_sp_%06X && "
+                "g_cpu.A[7] != (uint32_t)(_jsr_slot_sp_%06X + 4u) && "
                 "getenv(\"GENESIS_STRICT_JSR_STACK\")) {\n",
                 addr, addr);
         if (instr->has_target) {
             fprintf(f,
                     "    fprintf(stderr, \"JSR stack mismatch at $%06X -> "
-                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
-                    "_jsr_sp_%06X, g_cpu.A[7], "
-                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    "$%06X: pre=$%%08X slot=$%%08X post=$%%08X\\n\", "
+                    "_jsr_pre_sp_%06X, _jsr_slot_sp_%06X, g_cpu.A[7]);\n",
                     addr, bsr_target, addr, addr);
         } else {
             fprintf(f,
                     "    fprintf(stderr, \"dynamic JSR stack mismatch at "
-                    "$%06X: pre=$%%08X post=$%%08X expected=$%%08X\\n\", "
-                    "_jsr_sp_%06X, g_cpu.A[7], "
-                    "(uint32_t)(_jsr_sp_%06X - 4u));\n",
+                    "$%06X: pre=$%%08X slot=$%%08X post=$%%08X\\n\", "
+                    "_jsr_pre_sp_%06X, _jsr_slot_sp_%06X, g_cpu.A[7]);\n",
                     addr, addr, addr);
         }
         fprintf(f, "    exit(3);\n");
@@ -2579,7 +2575,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         emit_cycle_accounting(f, "    ", estimate_cycles(instr));
         fprintf(f, "    return; } /* RTE/skip propagation (pre-pop) */\n");
         fprintf(f,
-                "  if (g_cpu.A[7] != _jsr_sp_%06X)\n"
+                "  if (g_cpu.A[7] != (uint32_t)(_jsr_slot_sp_%06X + 4u))\n"
                 "    g_cpu.A[7] += 4; /* normal JSR pop */\n"
                 "  else\n"
                 "    ; /* nested skip-return already consumed this slot */\n",
