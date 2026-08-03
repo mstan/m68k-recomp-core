@@ -2540,14 +2540,16 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             fprintf(f, "  /* TODO: dynamic JSR/BSR EA %d/%d */\n", mode, reg);
         }
 
-        /* The flat-call backend intentionally permits guest stack idioms used
-         * by legacy titles (notably Sonic's sound driver), so exact wrapper
-         * balance is a focused diagnostic rather than a production invariant. */
+        /* A normal callee leaves this wrapper's return slot at pre_sp - 4.
+         * A nested skip-return may consume that slot before unwinding its
+         * generated C frames, leaving A7 back at pre_sp; that is also valid
+         * and the wrapper must not synthesize a second pop below. */
         fprintf(f,
                 "  if (!g_rte_pending && g_cpu.A[7] != "
                 "(uint32_t)(_jsr_sp_%06X - 4u) && "
+                "g_cpu.A[7] != _jsr_sp_%06X && "
                 "getenv(\"GENESIS_STRICT_JSR_STACK\")) {\n",
-                addr);
+                addr, addr);
         if (instr->has_target) {
             fprintf(f,
                     "    fprintf(stderr, \"JSR stack mismatch at $%06X -> "
@@ -2576,7 +2578,12 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         fprintf(f, "  if (g_rte_pending) { g_rte_pending = 0;\n");
         emit_cycle_accounting(f, "    ", estimate_cycles(instr));
         fprintf(f, "    return; } /* RTE/skip propagation (pre-pop) */\n");
-        fprintf(f, "  g_cpu.A[7] += 4; /* JSR pop */\n");
+        fprintf(f,
+                "  if (g_cpu.A[7] != _jsr_sp_%06X)\n"
+                "    g_cpu.A[7] += 4; /* normal JSR pop */\n"
+                "  else\n"
+                "    ; /* nested skip-return already consumed this slot */\n",
+                addr);
         break;
     }
 
