@@ -5223,6 +5223,19 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                 all_funcs.addrs[i], all_funcs.addrs[i]);
     fprintf(f_dispatch, "    { 0u, NULL }\n};\n\n");
 
+    fprintf(f_dispatch,
+        "static FuncPtr recomp_find_func(uint32_t addr) {\n"
+        "    int lo = 0, hi = %d;\n"
+        "    while (lo < hi) {\n"
+        "        int mid = lo + (hi - lo) / 2;\n"
+        "        if (s_dispatch_table[mid].addr < addr) lo = mid + 1;\n"
+        "        else hi = mid;\n"
+        "    }\n"
+        "    return (lo < %d && s_dispatch_table[lo].addr == addr)\n"
+        "         ? s_dispatch_table[lo].fn : NULL;\n"
+        "}\n\n",
+        all_funcs.count, all_funcs.count);
+
     /* Table accessors for interior-label detection in genesis_log_dispatch_miss */
     fprintf(f_dispatch, "int game_dispatch_table_size(void) { return %d; }\n", all_funcs.count);
     fprintf(f_dispatch,
@@ -5249,11 +5262,10 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "    addr = recomp_resolve_ram_trampoline(addr);\n"
         "    if (recomp_dispatch_ram_stub(addr))\n"
         "        return;\n"
-        "    for (int i = 0; s_dispatch_table[i].fn; i++) {\n"
-        "        if (s_dispatch_table[i].addr == addr) {\n"
-        "            s_dispatch_table[i].fn();\n"
-        "            return;\n"
-        "        }\n"
+        "    FuncPtr fn = recomp_find_func(addr);\n"
+        "    if (fn) {\n"
+        "        fn();\n"
+        "        return;\n"
         "    }\n"
         "    if (!game_dispatch_override(addr))\n"
         "        genesis_log_dispatch_miss(addr);\n"
