@@ -13,12 +13,21 @@
  * Lines beginning with '#' are comments and are ignored.
  */
 #include "annotations.h"
+#include "portable_io.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+static void copy_string(char *dst, size_t dst_size, const char *src) {
+    if (dst_size == 0) return;
+    size_t len = strlen(src);
+    if (len >= dst_size) len = dst_size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 bool annotations_load(AnnotationTable *out, const char *path) {
-    FILE *f = fopen(path, "r");
+    FILE *f = m68k_fopen(path, "r");
     if (!f) return false;
 
     char line[512];
@@ -37,20 +46,23 @@ bool annotations_load(AnnotationTable *out, const char *path) {
 
         /* Parse: addr,name,notes */
         char addr_str[16] = {0}, name[128] = {0}, notes[256] = {0};
-        char *tok = strtok(line, ",");
-        if (!tok) continue;
-        strncpy(addr_str, tok, sizeof(addr_str) - 1);
+        char *name_tok = strchr(line, ',');
+        char *notes_tok = NULL;
+        if (name_tok) {
+            *name_tok++ = '\0';
+            notes_tok = strchr(name_tok, ',');
+            if (notes_tok) *notes_tok++ = '\0';
+        }
 
-        tok = strtok(NULL, ",");
-        if (tok) strncpy(name, tok, sizeof(name) - 1);
+        copy_string(addr_str, sizeof(addr_str), line);
+        if (name_tok) copy_string(name, sizeof(name), name_tok);
 
-        tok = strtok(NULL, "\n");
-        if (tok) {
+        if (notes_tok) {
             /* Strip surrounding quotes if present */
-            if (tok[0] == '"') tok++;
-            int nlen = (int)strlen(tok);
-            if (nlen > 0 && tok[nlen-1] == '"') tok[nlen-1] = '\0';
-            strncpy(notes, tok, sizeof(notes) - 1);
+            if (notes_tok[0] == '"') notes_tok++;
+            size_t nlen = strlen(notes_tok);
+            if (nlen > 0 && notes_tok[nlen-1] == '"') notes_tok[nlen-1] = '\0';
+            copy_string(notes, sizeof(notes), notes_tok);
         }
 
         if (out->count >= capacity) {
@@ -62,8 +74,8 @@ bool annotations_load(AnnotationTable *out, const char *path) {
 
         Annotation *a = &out->entries[out->count++];
         a->addr = (uint32_t)strtoul(addr_str, NULL, 16);
-        strncpy(a->name,  name,  sizeof(a->name)  - 1);
-        strncpy(a->notes, notes, sizeof(a->notes) - 1);
+        copy_string(a->name, sizeof(a->name), name);
+        copy_string(a->notes, sizeof(a->notes), notes);
     }
 
     fclose(f);

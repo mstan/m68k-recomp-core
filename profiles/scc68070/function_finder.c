@@ -2,7 +2,7 @@
  * function_finder.c — 68K function boundary detection.
  *
  * Walks the ROM starting from known entry points (initial PC, interrupt
- * vectors, extra_func entries from game.cfg). Follows BSR/JSR to discover
+ * vectors, [functions].extra entries from game.toml). Follows BSR/JSR to discover
  * reachable functions. Marks RTS as terminators.
  *
  * Special cases to handle:
@@ -12,13 +12,14 @@
  *   DBcc             — loop branch (both taken and fall-through paths explored)
  *
  * Jump table detection: when JMP with PC-relative indexed EA is seen,
- * we consult game.cfg's jump_table entries to enumerate all case targets.
+ * we consult game.toml's [[jump_table]] entries to enumerate all case targets.
  */
 #include "function_finder.h"
 #include "m68k_decoder.h"
 #include "m68k_validator.h"
 #include "rom_parser.h"
 #include "game_config.h"
+#include "portable_io.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +44,7 @@ static int s_invalid_terminations = 0;
 /* Phase 6: PC-indexed jump-table discovery counters. */
 static int s_jt_pc_indexed_sites      = 0;  /* JMP (d8,PC,Xn.W) seen        */
 static int s_jt_auto_enumerated       = 0;  /* tables auto-walked from rom  */
-static int s_jt_manual_enumerated     = 0;  /* tables matched in game.cfg   */
+static int s_jt_manual_enumerated     = 0;  /* game.toml table matches      */
 static int s_jt_targets_pushed        = 0;  /* worklist additions           */
 static int s_jt_targets_rejected      = 0;  /* failed validation            */
 static int s_jt_unresolved            = 0;  /* path terminated, no table    */
@@ -318,8 +319,8 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list, const GameCo
                 break;
             }
 
-            /* Follow calls — but skip blacklisted addresses (game.cfg
-             * `blacklist` directive). Useful for JSR/BSR targets that
+            /* Follow calls — but skip game.toml [functions].blacklist
+             * addresses. Useful for JSR/BSR targets that
              * happen to land on non-code addresses (e.g., conditional
              * code paths the static walker can't prove dead). */
             if (m68k_is_call(&instr) && instr.has_target
@@ -348,8 +349,8 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list, const GameCo
 
             /* JMP with indexed EA — handle the common Genesis pattern
              * `JMP (d8,PC,Xn.W)` (mode 7, reg 3) by enumerating its
-             * jump table either from a matching game.cfg jump_table
-             * directive or, failing that, by an auto-walk of pcrel16
+             * jump table either from a matching game.toml [[jump_table]]
+             * entry or, failing that, by an auto-walk of pcrel16
              * entries until the validator says we've left the table. */
             if (instr.mnemonic == MN_JMP && !instr.has_target) {
                 int ea_mode = (instr.src_ea >> 3) & 7;
@@ -469,7 +470,7 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list, const GameCo
         char log_path[256];
         snprintf(log_path, sizeof(log_path),
                  "generated/%s.unresolved_jumptables.log", cfg->output_prefix);
-        FILE *lf = fopen(log_path, "w");
+        FILE *lf = m68k_fopen(log_path, "w");
         if (lf) {
             fprintf(lf, "# %d PC-indexed JMP dispatch sites with no static "
                         "table coverage.\n", s_jt_unresolved);
@@ -478,9 +479,9 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list, const GameCo
                         "1=auto-walk yielded too few entries, "
                         "2=non-PC-indexed JMP variant\n");
             fprintf(lf, "# Each line is one runtime dynamic dispatch — add a\n"
-                        "#   jump_table <base> <end> <stride> <fmt>\n"
-                        "# directive to game.cfg (or to the disasm_jumptables\n"
-                        "# side file) to convert it to static enumeration.\n");
+                        "# matching game.toml [[jump_table]] entry (or update the\n"
+                        "# disasm_jumptables discovery file) after validation\n"
+                        "# to convert it to static enumeration.\n");
             for (int i = 0; i < s_jt_unresolved; i++) {
                 const UnresolvedSite *u = &s_jt_unresolved_sites[i];
                 fprintf(lf, "%06X %06X %04X %u\n",
