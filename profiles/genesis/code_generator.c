@@ -2313,6 +2313,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
 
     char src_expr[256], addr_expr[256];
 
+    if (ws_site_for_kind(addr, WS_SITE_GAME_HOOK, WS_SITE_GAME_HOOK))
+        fprintf(f, "  if (genesis_game_instruction_hook(0x%06Xu)) return; /* game-owned extension */\n", addr);
+
     /* [widescreen] post-patch widening: when this instruction's address is a
      * configured add/sub-margin site, emit a word-sized adjustment of the named
      * data register by (g_ws_margin >> shift) BEFORE the instruction's own C.
@@ -2341,14 +2344,16 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
 
     /* ------------------------------------------------------------------ */
     case MN_RTS:
-        /* If this function or a split tail-call predecessor has any
-         * addq.l #N,sp stack skip levels, consume one at the RTS and
-         * propagate the return via g_rte_pending. */
+        /* A stack skip can discard MORE than one return slot (SMPS's
+         * stop-track command uses addq.w #8,sp). Carry the complete count
+         * through the C callers; a boolean loses the second unwind and
+         * resumes code the guest deliberately skipped. Tail edges do not
+         * consume this count; each actual JSR/BSR caller consumes one. */
         if (*has_sp_adjust) {
-            fprintf(f, "  if (_sp_popped > 0) { _sp_popped--; g_rte_pending = 1; }\n");
-            fprintf(f, "  else if (g_split_sp_popped > 0) { g_split_sp_popped--; g_rte_pending = 1; }\n");
+            fprintf(f, "  if (_sp_popped > 0) { g_rte_pending = _sp_popped; _sp_popped = 0; }\n");
+            fprintf(f, "  else if (g_split_sp_popped > 0) { g_rte_pending = g_split_sp_popped; g_split_sp_popped = 0; }\n");
         } else {
-            fprintf(f, "  if (g_split_sp_popped > 0) { g_split_sp_popped--; g_rte_pending = 1; }\n");
+            fprintf(f, "  if (g_split_sp_popped > 0) { g_rte_pending = g_split_sp_popped; g_split_sp_popped = 0; }\n");
         }
         emit_cycle_accounting(f, "  ", estimate_cycles(instr));
         fprintf(f, "  return;\n");
@@ -2570,9 +2575,9 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
          * `addq.l #4,sp; rts` skip idiom, the game's own addq already
          * adjusted A7 and SJ's rts popped the slot this wrapper pushed.
          * Doing our pop here would double-adjust A7 by +4. Skipping the
-         * pop keeps A7 in sync with hardware. Flag is cleared so the
-         * next level up resumes normally. */
-        fprintf(f, "  if (g_rte_pending) { g_rte_pending = 0;\n");
+         * pop keeps A7 in sync with hardware. Consume one skipped return
+         * slot; additional skipped slots continue through outer callers. */
+        fprintf(f, "  if (g_rte_pending) { --g_rte_pending;\n");
         emit_cycle_accounting(f, "    ", estimate_cycles(instr));
         fprintf(f, "    return; } /* RTE/skip propagation (pre-pop) */\n");
         fprintf(f,
