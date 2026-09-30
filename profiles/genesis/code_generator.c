@@ -5101,6 +5101,19 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                 int cyc = estimate_cycles(&instr);
                 emit_cycle_accounting(f_func, "  ", cyc);
             }
+
+            /* Two valid entry streams can overlap in ROM. Sorted emission
+             * interleaves their instruction starts, but linear execution
+             * must continue at the byte after THIS instruction. Otherwise a
+             * normal path runs the other stream's decoded extension words.
+             * RKA $0289FA..$028A00 is one such case: falling through the
+             * alternate $0289FC entry writes $02 into an object's type. */
+            uint32_t next_pc = pc + instr.byte_length;
+            if (j + 1 < instrs.count && instrs.addrs[j + 1] < next_pc &&
+                addrset_contains(&instrs, next_pc)) {
+                addrset_insert(&labels, next_pc);
+                fprintf(f_func, "  goto label_%06X;\n", next_pc);
+            }
         }
 
         /* Fall-through: if the last instruction in this function is not a
