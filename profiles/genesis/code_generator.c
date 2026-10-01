@@ -5261,6 +5261,37 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "    return (i >= 0 && i < %d) ? s_dispatch_table[i].addr : 0;\n"
         "}\n\n", all_funcs.count);
 
+    /* game_hook sites, sorted, so the tier-3 interpreter can run the same
+     * genesis_game_instruction_hook() callbacks as the generated code. */
+    {
+        uint32_t *hooks = NULL;
+        int nhooks = 0;
+        for (int i = 0; i < s_ws_site_count; i++)
+            if (s_ws_sites[i].kind == WS_SITE_GAME_HOOK) {
+                hooks = (uint32_t *)realloc(hooks, (size_t)(nhooks + 1) * sizeof *hooks);
+                hooks[nhooks++] = s_ws_sites[i].addr & 0xFFFFFFu;
+            }
+        for (int i = 1; i < nhooks; i++)
+            for (int j = i; j > 0 && hooks[j - 1] > hooks[j]; j--) {
+                uint32_t t = hooks[j]; hooks[j] = hooks[j - 1]; hooks[j - 1] = t;
+            }
+        fprintf(f_dispatch, "static const uint32_t s_game_hook_sites[] = {");
+        for (int i = 0; i < nhooks; i++)
+            fprintf(f_dispatch, "%s0x%06Xu", i ? ", " : " ", hooks[i]);
+        fprintf(f_dispatch, "%s0u };\n", nhooks ? ", " : " ");
+        fprintf(f_dispatch,
+            "int game_instruction_hook_site(uint32_t pc) {\n"
+            "    int lo = 0, hi = %d;\n"
+            "    while (lo < hi) {\n"
+            "        int mid = lo + (hi - lo) / 2;\n"
+            "        if (s_game_hook_sites[mid] < pc) lo = mid + 1;\n"
+            "        else hi = mid;\n"
+            "    }\n"
+            "    return lo < %d && s_game_hook_sites[lo] == pc;\n"
+            "}\n\n", nhooks, nhooks);
+        free(hooks);
+    }
+
     fprintf(f_dispatch,
         "typedef struct RecompTailFrame {\n"
         "    int pending;\n"
