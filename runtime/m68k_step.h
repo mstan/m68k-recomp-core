@@ -85,12 +85,27 @@ typedef struct {
     size_t count;
 } M68kStepModule;
 
+/* Optional immutable parallel effect metadata; no change to old catalog or
+ * operation-object ABI. Zero/absent means an arbitrary observable callback. */
+typedef struct {
+    const M68kStepModule *module;
+    const uint8_t *register_only;
+} M68kStepEffectModule;
+
 void m68k_step_init(M68kStepContext *,const M68kStepBus *,void *user);
 /* Configure between completed operations. The ordinary fetch16 is still
  * required; unsupported ranges always retain the original portable path. */
 int m68k_step_code_span(M68kStepContext *,M68kStepCodeSpan);
 M68kStepResult m68k_step_reset(M68kStepContext *);
 M68kStepResult m68k_step_execute(M68kStepContext *,const M68kStepEntry *);
+/* A region may use this only for independently qualified operations that
+ * access registers/charge exclusively: no bus, callbacks, exceptions, stopped
+ * state or external storage. Unknown operations retain m68k_step_execute.
+ * A current, side-effect-free code_span is mandatory; MISS makes no change.
+ * Live words, retirement diagnostics and variable charge remain exact. Trace
+ * and reentry always retain the ordinary observable instruction boundary. */
+M68kStepResult m68k_step_execute_register(M68kStepContext *,const M68kStepEntry *);
+#define M68K_STEP_HAS_REGISTER_REGIONS 1
 /* Runtime correctness floors use the same exception/WAIT/trace boundary.
  * The callback decodes current bytes and sets PC/charge; no stale entry or
  * process-global CPU binding is used. Unsupported semantics must halt. */
