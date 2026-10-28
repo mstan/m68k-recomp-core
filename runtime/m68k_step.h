@@ -49,6 +49,7 @@ typedef struct {
     void (*reset_devices)(void *);
 } M68kStepBus;
 
+struct M68kStepEntry;
 typedef struct M68kStepContext {
     M68kStepState state;
     M68kStepBus bus;
@@ -63,12 +64,20 @@ typedef struct M68kStepContext {
      * The view is consumed immediately, never cached across instructions.
      * Appended so existing generated operation prefix offsets stay unchanged. */
     const uint8_t *(*code_span)(void *,uint32_t,size_t);
+    /* Optional host-owned code identity. 0 requests the live guard, +1 means
+     * all current bytes match, -1 means mismatch. The host must cover every
+     * writer/remap and never reuse identity across an unowned observer. */
+    int (*code_guard)(void *,const struct M68kStepEntry *);
+    /* Bracket unqualified callbacks, including faults and live execution.
+     * The host suspends identity reuse during the callback and invalidates
+     * direct/opaque writes on return. Not architectural/serialized state. */
+    void (*code_observer)(void *,int entering);
 } M68kStepContext;
 #define M68K_STEP_HAS_CODE_SPANS 1
 typedef const uint8_t *(*M68kStepCodeSpan)(void *,uint32_t,size_t);
 
 typedef void (*M68kStepOperation)(M68kStepContext *);
-typedef struct {
+typedef struct M68kStepEntry {
     uint32_t pc;
     uint16_t words[11];
     uint8_t word_count;
@@ -77,7 +86,8 @@ typedef struct {
 } M68kStepEntry;
 
 /* Entries are strictly increasing by guest PC. Image identity is diagnostic;
- * execution always checks current mapped opcode AND extension bytes. */
+ * execution validates current opcode AND extension identity (live bytes by
+ * default; optional host versions must cover all writes/remaps/observers). */
 typedef struct {
     const char *name;
     uint32_t image_base, image_size, image_crc32;
@@ -85,8 +95,9 @@ typedef struct {
     size_t count;
 } M68kStepModule;
 
-/* Optional immutable parallel effect metadata; no change to old catalog or
- * operation-object ABI. Zero/absent means an arbitrary observable callback. */
+/* Optional immutable parallel effect flags; REGISTER or TRACKED_BUS below.
+ * Old boolean arrays remain valid. Zero/absent is an arbitrary callback.
+ * No change to old catalog or operation-object ABI. */
 typedef struct {
     const M68kStepModule *module;
     const uint8_t *register_only;
@@ -98,6 +109,12 @@ void m68k_step_init(M68kStepContext *,const M68kStepBus *,void *user);
 int m68k_step_code_span(M68kStepContext *,M68kStepCodeSpan);
 M68kStepResult m68k_step_reset(M68kStepContext *);
 M68kStepResult m68k_step_execute(M68kStepContext *,const M68kStepEntry *);
+/* Independently qualified operations may bypass opaque-callback fencing only
+ * when all external accesses use this context's tracked bus/state helpers.
+ * This does NOT bypass live guards unless the host supplies sound identity. */
+enum { M68K_STEP_EFFECT_REGISTER=1, M68K_STEP_EFFECT_TRACKED_BUS=2 };
+M68kStepResult m68k_step_execute_tracked(M68kStepContext *,const M68kStepEntry *);
+#define M68K_STEP_HAS_CODE_IDENTITY 1
 /* A region may use this only for independently qualified operations that
  * access registers/charge exclusively: no bus, callbacks, exceptions, stopped
  * state or external storage. Unknown operations retain m68k_step_execute.

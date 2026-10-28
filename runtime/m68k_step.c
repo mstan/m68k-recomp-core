@@ -172,10 +172,14 @@ M68kStepResult m68k_step_execute_register(M68kStepContext *c,const M68kStepEntry
        (c->state.regs.SR&T))return M68K_STEP_MISS;
     uint32_t pc=entry->pc;size_t bytes=(size_t)entry->word_count*2u;
     if((pc&1u)||pc>0xffffffu||bytes>0x1000000u-pc)return M68K_STEP_MISS;
-    const uint8_t *span=c->code_span(c->user,pc,bytes);
-    if(!span)return M68K_STEP_MISS;
-    for(unsigned n=0;n<entry->word_count;++n)
-        if((((uint32_t)span[n*2u]<<8)|span[n*2u+1u])!=entry->words[n])return M68K_STEP_MISS;
+    int guarded=c->code_guard?c->code_guard(c->user,entry):0;
+    if(guarded<0)return M68K_STEP_MISS;
+    if(!guarded) {
+        const uint8_t *span=c->code_span(c->user,pc,bytes);
+        if(!span)return M68K_STEP_MISS;
+        for(unsigned n=0;n<entry->word_count;++n)
+            if((((uint32_t)span[n*2u]<<8)|span[n*2u+1u])!=entry->words[n])return M68K_STEP_MISS;
+    }
     c->state.instruction_pc=pc;c->state.fault_opcode=entry->words[0];
     c->state.exception_vector=0;c->charge=entry->cycles;
     c->state.regs.PC=(pc+(uint32_t)bytes)&0xffffffu;
@@ -197,7 +201,9 @@ static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *
         return (M68kStepResult)c->state.fault;
     }
     uint32_t pc=c->state.regs.PC;
-    if(entry) {
+    int guarded=entry&&c->code_guard?c->code_guard(c->user,entry):0;
+    if(guarded<0){c->fault_escape=NULL;return M68K_STEP_MISS;}
+    if(entry && !guarded) {
         size_t bytes=(size_t)entry->word_count*2u;
         const uint8_t *span=c->code_span && !(pc&1u) && pc<=0xffffffu && bytes<=0x1000000u-pc?
             c->code_span(c->user,pc,bytes):NULL;
@@ -221,9 +227,23 @@ static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *
     return M68K_STEP_OK;
 }
 M68kStepResult m68k_step_execute(M68kStepContext *c,const M68kStepEntry *entry)
+{
+    if(c->fault_escape)return M68K_STEP_REENTERED;
+    if(c->code_observer)c->code_observer(c->user,1);
+    M68kStepResult result=execute_operation(c,entry,entry?entry->execute:NULL);
+    if(c->code_observer)c->code_observer(c->user,0);
+    return result;
+}
+M68kStepResult m68k_step_execute_tracked(M68kStepContext *c,const M68kStepEntry *entry)
 {return execute_operation(c,entry,entry?entry->execute:NULL);}
 M68kStepResult m68k_step_execute_live(M68kStepContext *c,M68kStepOperation operation)
-{return execute_operation(c,NULL,operation);}
+{
+    if(c->fault_escape)return M68K_STEP_REENTERED;
+    if(c->code_observer)c->code_observer(c->user,1);
+    M68kStepResult result=execute_operation(c,NULL,operation);
+    if(c->code_observer)c->code_observer(c->user,0);
+    return result;
+}
 void m68k_step_unimplemented(M68kStepContext *c)
 {fault(c,M68K_STEP_UNSUPPORTED,c->state.instruction_pc);}
 
