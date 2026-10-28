@@ -1641,8 +1641,13 @@ static void scan_function(const GenesisRom *rom, uint32_t start_addr,
 /* Callable addresses can be branch-entered suffixes or shared epilogues of a
  * larger CFG. Cutting the host at every such address loses valid fall-through
  * paths. Establish a canonical owner only when an unbounded, legal CFG reaches
- * the candidate through an explicit branch/JMP edge; unrelated adjacent code
- * remains a hard boundary. */
+ * the candidate through an explicit branch/JMP edge. Position-independent
+ * modules additionally admit legal fall-through instruction boundaries: their
+ * guarded asynchronous resume map already enters every instruction with
+ * authoritative guest state. Observed continuation seeds must not force one
+ * host dispatch per instruction. Unreachable/invalid adjacent code remains a
+ * hard boundary, and the final boundary policy is re-proved below. Flat-ROM
+ * behavior is unchanged. */
 static uint32_t *build_entry_owners(const GenesisRom *rom,
                                     const AddrSet *all_funcs,
                                     const GameConfig *cfg,
@@ -1679,7 +1684,8 @@ static uint32_t *build_entry_owners(const GenesisRom *rom,
         for (int k = 0; k < instrs.count; k++) {
             int j = function_entry_index(instrs.addrs[k], all_funcs->addrs, n);
             if (j < 0 || j == i) continue;
-            if (!addrset_contains(&labels, instrs.addrs[k])) continue;
+            if (!addrset_contains(&labels, instrs.addrs[k]) &&
+                !(s_module_symbol && cfg && cfg->async_resume_entries)) continue;
             bool larger = sizes[i] > sizes[j];
             bool equal_tie = sizes[i] == sizes[j]
                           && all_funcs->addrs[i] < all_funcs->addrs[j];
