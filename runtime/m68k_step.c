@@ -162,6 +162,27 @@ int m68k_step_interrupt(M68kStepContext *c,unsigned level)
     return 1;
 }
 
+M68kStepResult m68k_step_execute_register(M68kStepContext *c,const M68kStepEntry *entry)
+{
+    if(c->fault_escape)return M68K_STEP_REENTERED;
+    if(c->state.fault)return (M68kStepResult)c->state.fault;
+    if(c->state.stopped)return M68K_STEP_STOPPED;
+    if(!entry||!entry->execute||!entry->cycles||!entry->word_count||entry->word_count>11||
+       entry->pc!=c->state.regs.PC||!c->bus.fetch16||!c->code_span||
+       (c->state.regs.SR&T))return M68K_STEP_MISS;
+    uint32_t pc=entry->pc;size_t bytes=(size_t)entry->word_count*2u;
+    if((pc&1u)||pc>0xffffffu||bytes>0x1000000u-pc)return M68K_STEP_MISS;
+    const uint8_t *span=c->code_span(c->user,pc,bytes);
+    if(!span)return M68K_STEP_MISS;
+    for(unsigned n=0;n<entry->word_count;++n)
+        if((((uint32_t)span[n*2u]<<8)|span[n*2u+1u])!=entry->words[n])return M68K_STEP_MISS;
+    c->state.instruction_pc=pc;c->state.fault_opcode=entry->words[0];
+    c->state.exception_vector=0;c->charge=entry->cycles;
+    c->state.regs.PC=(pc+(uint32_t)bytes)&0xffffffu;
+    entry->execute(c);
+    c->state.cycles+=c->charge;++c->state.instructions;
+    return M68K_STEP_OK;
+}
 static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *entry,M68kStepOperation operation)
 {
     if(c->fault_escape)return M68K_STEP_REENTERED;
