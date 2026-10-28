@@ -652,6 +652,14 @@ static bool configured_function_pointer_edge(const GameConfig *cfg,
  * Unlike the loose discovery heuristic above, this succeeds only when every
  * reachable path consumes the return address before returning. Conditional
  * helpers are supported when all branches satisfy that requirement. */
+bool function_finder_trap_handler(const GenesisRom *rom, unsigned trap_num,
+                                  uint32_t *handler_out) {
+    uint32_t h = rom_read32(rom, (0x20u + (trap_num & 0xFu)) * 4u) & 0xFFFFFFu;
+    if (h < 0x200u || h >= rom->rom_size || (h & 1u)) return false;
+    *handler_out = h;
+    return true;
+}
+
 bool function_finder_pops_return_unconditionally(const GenesisRom *rom, uint32_t start) {
     return m68k_return_capture_is_unconditional(rom, start);
 }
@@ -764,6 +772,17 @@ void function_finder_run(const GenesisRom *rom, FunctionList *list,
                  * via late_extra lose their next-state entries. */
                 if (function_captures_return_addr(rom, instr.target_addr))
                     add_function(list, pc + instr.byte_length);
+            }
+
+            /* TRAP #n transfers to its vector's handler, which RTEs back to
+             * the next instruction — a call edge. The code generator calls
+             * the handler directly, so it must be a discovered function. */
+            if (instr.mnemonic == MN_TRAP) {
+                uint32_t trap_handler;
+                if (function_finder_trap_handler(rom, (unsigned)instr.imm32,
+                                                 &trap_handler)
+                        && !game_config_is_blacklisted(cfg, trap_handler))
+                    add_function(list, trap_handler);
             }
 
             /* JSR (d8,PC,Dn.W) — a computed CALL into a bra-ladder (the Sonic

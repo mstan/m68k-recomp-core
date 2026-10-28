@@ -39,3 +39,11 @@ void function_list_free(FunctionList *list);
  * this to emit `jsr`/`bsr` to such a routine as a non-returning tail transfer
  * instead of falling through to the instruction after the call. */
 bool function_finder_pops_return_unconditionally(const GenesisRom *rom, uint32_t start);
+
+/* TRAP #trap_num's handler, read from the ROM vector table ($80 + 4*n).
+ * True only when the vector points at plausible ROM code (even, past the
+ * $200-byte vector table + header, inside the ROM image). Discovery uses it
+ * to register the handler as a function; the code generator uses it to call
+ * that handler directly. Vectors into RAM or garbage return false. */
+bool function_finder_trap_handler(const GenesisRom *rom, unsigned trap_num,
+                                  uint32_t *handler_out);

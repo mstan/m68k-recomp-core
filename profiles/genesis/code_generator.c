@@ -2024,14 +2024,49 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         break;
 
     /* ------------------------------------------------------------------ */
-    case MN_TRAP:
-        /* TRAP #N: vectors 0x20..0x2F. Hand off to the runtime; on Sonic
-         * this aborts loud since no trap is expected in steady state. */
-        emit_cycle_accounting(f, "  ", estimate_cycles(instr));
-        fprintf(f, "  m68k_trap_vector(0x%02Xu); return;\n",
-                0x20u + (unsigned)(instr->imm32 & 0xF));
-        *skip_until_label = true;
+    case MN_TRAP: {
+        /* TRAP #N (vectors 0x20..0x2F). Games such as Phantasy Star IV use
+         * TRAPs as subroutine calls: the handler is ordinary ROM code that
+         * RTEs back to the next instruction. Model it as a call, like
+         * JSR/BSR: build the 68000 exception frame (PC, then SR; SR ends at
+         * the lower address), set S and clear T (the I mask is unchanged),
+         * call the handler, then consume the RTE signal its RTE raises and
+         * continue inline. The handler's generated RTE pops this frame and
+         * restores SR, so A7 and SR come back exactly as on hardware.
+         *
+         * Supervisor-only, like the rest of this model (RTE does not swap
+         * stacks either): Genesis games run with S=1, so A7 is the SSP.
+         *
+         * Only a discovered handler is called directly (discovery registers
+         * every ROM trap handler; see function_finder_trap_handler). The
+         * Tier-3 framed capsule cannot stand in for one: it runs to a depth-0
+         * RTS, so it would execute the handler's RTE and then the caller's
+         * own continuation. Anything else — a vector into RAM, a garbage
+         * vector, a blacklisted handler — still aborts loudly at runtime. */
+        unsigned trap_num = (unsigned)(instr->imm32 & 0xF);
+        uint32_t handler;
+        if (function_finder_trap_handler(rom, trap_num, &handler) &&
+            func_is_known(handler)) {
+            /* Cycles are charged by the per-instruction tail after this
+             * case, as for JSR; charging here too would double-count. */
+            fprintf(f, "  { /* TRAP #%u -> $%06X */\n", trap_num, handler);
+            fprintf(f, "    uint16_t _trap_sr = g_cpu.SR;\n");
+            fprintf(f, "    g_cpu.A[7] -= 4; m68k_write32(g_cpu.A[7], 0x%06Xu); /* push PC */\n",
+                    instr->addr + instr->byte_length);
+            fprintf(f, "    g_cpu.A[7] -= 2; m68k_write16(g_cpu.A[7], _trap_sr); /* push SR */\n");
+            fprintf(f, "    g_cpu.SR = (uint16_t)((_trap_sr | 0x2000u) & 0x7FFFu); /* S=1, T=0 */\n");
+            fprintf(f, "    int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
+            fprintf(f, "    recomp_call_func(func_%06X);\n", handler);
+            fprintf(f, "    g_split_sp_popped = _saved_split_sp_popped;\n");
+            fprintf(f, "    if (g_rte_pending) --g_rte_pending; /* consume the handler's RTE */\n");
+            fprintf(f, "  }\n");
+        } else {
+            emit_cycle_accounting(f, "  ", estimate_cycles(instr));
+            fprintf(f, "  m68k_trap_vector(0x%02Xu); return;\n", 0x20u + trap_num);
+            *skip_until_label = true;
+        }
         break;
+    }
 
     /* ------------------------------------------------------------------ */
     case MN_TRAPV:
