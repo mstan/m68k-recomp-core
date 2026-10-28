@@ -2773,7 +2773,10 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 (unsigned)(0xFF00u | (instr->imm32 & 0xFFu)));
         break;
     case MN_ANDI_TO_SR:
-        fprintf(f, "  g_cpu.SR &= 0x%04Xu; /* ANDI #imm,SR */\n",
+        /* Lowering the mask can make a pending V-int takeable before the
+         * next instruction: glue_sr_written() delivers it there. */
+        fprintf(f, "  g_cpu.SR &= 0x%04Xu; /* ANDI #imm,SR */\n"
+                   "  glue_sr_written();\n",
                 (unsigned)(instr->imm32 & 0xFFFFu));
         break;
     case MN_EORI_TO_CCR:
@@ -2781,7 +2784,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 (unsigned)(instr->imm32 & 0xFFu));
         break;
     case MN_EORI_TO_SR:
-        fprintf(f, "  g_cpu.SR ^= 0x%04Xu; /* EORI #imm,SR */\n",
+        fprintf(f, "  g_cpu.SR ^= 0x%04Xu; /* EORI #imm,SR */\n"
+                   "  glue_sr_written();\n",
                 (unsigned)(instr->imm32 & 0xFFFFu));
         break;
 
@@ -3588,6 +3592,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             /* Mask to the valid 68000 SR bits (T,S,I2-0,X,N,Z,V,C = 0xA71F) —
              * unused bits read as 0 on hardware. */
             fprintf(f, "  g_cpu.SR = (uint16_t)((%s) & 0xA71Fu);\n", src_expr);
+            fprintf(f, "  glue_sr_written();\n");
         } else {
             emit_ea_store(f, instr, instr->src_ea, M68K_SIZE_W, &er, "g_cpu.SR");
         }
