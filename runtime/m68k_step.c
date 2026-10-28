@@ -75,7 +75,10 @@ void m68k_step_init(M68kStepContext *c,const M68kStepBus *bus,void *user)
 int m68k_step_code_span(M68kStepContext *c,M68kStepCodeSpan span)
 {
     if(!c||c->fault_escape)return 0;
-    c->code_span=span;return 1;
+    if(c->code_observer)c->code_observer(c->user,1);
+    c->code_span=span;
+    if(c->code_observer)c->code_observer(c->user,0);
+    return 1;
 }
 void m68k_step_set_sr(M68kStepContext *c,uint16_t value)
 {
