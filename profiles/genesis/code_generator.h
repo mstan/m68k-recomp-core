@@ -62,6 +62,14 @@ bool codegen_emit_step_semantics(FILE *out, const GenesisRom *rom,
  * operations return false, never a no-op. */
 bool codegen_emit_step_operation(FILE *out, const GenesisRom *rom,
                                  const M68KInstr *instruction);
+/* Closed single-memory-RMW specialization, using the SAME ordinary emitter
+ * body as fallback. Only a complete dual-owned managed context view may latch
+ * its EA and access bytes directly. Other bus/WAIT/fault paths stay ordinary.
+ * Predecrement/postincrement updates remain in the selected original body.
+ * Callers replacing archived callbacks must separately prove exact canonical
+ * ordinary-body equivalence; an opcode/effect flag is not that proof. */
+bool codegen_owned_rmw_instruction(const M68KInstr *);
+bool codegen_emit_owned_rmw_operation(FILE *,const GenesisRom *,const M68KInstr *);
 /* Initial manual-derived cost for an explicit-PC operation. Dynamic branches,
  * shifts and conditional sets override it in the emitted operation. Multiply/
  * divide still use documented nominal costs until independently qualified. */

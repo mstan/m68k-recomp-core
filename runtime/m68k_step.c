@@ -26,6 +26,18 @@ static uint8_t *data_pointer(M68kStepContext *c,uint32_t a,size_t bytes,int writ
     *view=current;return view->data+(a-view->address);
 }
 
+int m68k_step_owned_rmw(M68kStepContext*c,uint32_t a,unsigned bytes,M68kStepOwnedRmw*out)
+{
+    if(!c||!out||!c->fault_escape||!c->data_active||
+       (bytes!=1&&bytes!=2&&bytes!=4))return 0;
+    a&=0xffffffu;
+    if((bytes>1&&(a&1u))||bytes>0x1000000u-a)return 0;
+    if(bytes==1?(!c->bus.read8||!c->bus.write8):(!c->bus.read16||!c->bus.write16))return 0;
+    uint8_t *read=data_pointer(c,a,bytes,0);if(!read)return 0;
+    uint8_t *write=data_pointer(c,a,bytes,1);if(!write)return 0;
+    out->read=read;out->write=write;++c->owned_rmw_grants;return 1;
+}
+
 static void fault(M68kStepContext *c,M68kStepResult reason,uint32_t address)
 {
     data_end(c);

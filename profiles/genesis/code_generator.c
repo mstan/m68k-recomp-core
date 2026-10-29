@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <ctype.h>
 
 /* Current-instruction context for diagnostics, set at the top of
  * emit_instr and read by helpers (e.g., emit_ea_store_ex) so they can
@@ -4321,6 +4322,82 @@ bool codegen_emit_step_operation(FILE *f,const GenesisRom *rom,const M68KInstr *
     s_diag_func_name=saved_name;s_diag_func_addr=saved_addr;s_diag_instr=saved_ins;
     if(ferror(f))return false;
     return handled || codegen_emit_step_semantics(f,rom,ins);
+}
+
+bool codegen_owned_rmw_instruction(const M68KInstr *ins)
+{
+    if(!ins||ins->src_ea<0)return false;
+    unsigned mode=(unsigned)ins->src_ea>>3,reg=(unsigned)ins->src_ea&7u;
+    if(mode<2||mode>7||(mode==7&&reg>1))return false;
+    switch(ins->mnemonic){
+    case MN_ADD:case MN_SUB:case MN_AND:case MN_OR:
+        return (ins->words[0]&0x100u)!=0;
+    case MN_ADDI:case MN_SUBI:case MN_ANDI:case MN_ORI:case MN_EORI:case MN_EOR:
+    case MN_ADDQ:case MN_SUBQ:case MN_CLR:case MN_NEG:case MN_NEGX:case MN_NOT:
+    case MN_BCHG:case MN_BCLR:case MN_BSET:case MN_TAS:case MN_NBCD:return true;
+    case MN_LSL:case MN_LSR:case MN_ASL:case MN_ASR:
+    case MN_ROL:case MN_ROR:case MN_ROXL:case MN_ROXR:return ins->mem_shift;
+    default:return false;
+    }
+}
+
+typedef struct {size_t begin,end,args,close;unsigned bits;} OwnedRmwCall;
+static bool owned_rmw_call(const char*body,const char*prefix,OwnedRmwCall*out)
+{
+    const char*p=strstr(body,prefix);if(!p||strstr(p+strlen(prefix),prefix))return false;
+    const char*width=p+strlen(prefix);unsigned bits=0;
+    if(!strncmp(width,"8(",2))bits=8;
+    else if(!strncmp(width,"16(",3))bits=16;
+    else if(!strncmp(width,"32(",3))bits=32;
+    else return false;
+    const char*open=strchr(width,'('),*end=open+1;unsigned depth=1;
+    for(;*end&&depth;++end){if(*end=='(')++depth;else if(*end==')')--depth;}
+    if(depth)return false;
+    out->begin=(size_t)(p-body);out->end=(size_t)(end-body);
+    out->args=(size_t)(open+1-body);out->close=(size_t)(end-1-body);out->bits=bits;return true;
+}
+static bool owned_rmw_same_ea(const char*body,size_t a,size_t a_end,size_t b,size_t b_end)
+{
+    while(a_end>a&&isspace((unsigned char)body[a_end-1]))--a_end;
+    while(b_end>b&&isspace((unsigned char)body[b_end-1]))--b_end;
+    while(a<a_end&&isspace((unsigned char)body[a]))++a;
+    while(b<b_end&&isspace((unsigned char)body[b]))++b;
+    /* Absolute-long load historically omits the literal's unsigned suffix. */
+    if(a_end-a>2&&b_end-b>2&&body[a]=='0'&&body[a+1]=='x'&&body[b]=='0'&&body[b+1]=='x'){
+        if(body[a_end-1]=='u'||body[a_end-1]=='U')--a_end;
+        if(body[b_end-1]=='u'||body[b_end-1]=='U')--b_end;
+    }
+    return a_end-a==b_end-b&&!memcmp(body+a,body+b,a_end-a);
+}
+bool codegen_emit_owned_rmw_operation(FILE*out,const GenesisRom*rom,const M68KInstr*ins)
+{
+    if(!out||!rom||!codegen_owned_rmw_instruction(ins))return false;
+    FILE*buffer=tmpfile();if(!buffer)return false;
+    bool ok=codegen_emit_step_operation(buffer,rom,ins)&&!fflush(buffer);
+    long size=ok?ftell(buffer):-1;char*body=NULL;bool emitted=false;
+    if(size<=0||size>1048576||fseek(buffer,0,SEEK_SET))goto done;
+    body=malloc((size_t)size+1u);if(!body)goto done;
+    if(fread(body,1,(size_t)size,buffer)!=(size_t)size)goto done;body[size]=0;
+    OwnedRmwCall read,write;
+    if(!owned_rmw_call(body,"m68k_read",&read)||!owned_rmw_call(body,"m68k_write",&write)||
+       read.bits!=write.bits||read.end>write.begin||strstr(body,"ctx->")||
+       strstr(body,"m68k_step_")||strstr(body,"glue_")||strstr(body,"return"))goto done;
+    size_t comma=write.args;unsigned depth=0;
+    for(;comma<write.close;++comma){char ch=body[comma];if(ch=='(')++depth;else if(ch==')'){if(!depth)goto done;--depth;}else if(ch==','&&!depth)break;}
+    if(comma==write.close||!owned_rmw_same_ea(body,read.args,read.close,write.args,comma))goto done;
+    unsigned bytes=read.bits/8,mode=(unsigned)ins->src_ea>>3,reg=(unsigned)ins->src_ea&7u;
+    fprintf(out,"  { M68kStepOwnedRmw _owned; uint32_t _owned_ea=(uint32_t)(%.*s)",
+        (int)(read.close-read.args),body+read.args);
+    if(mode==4)fprintf(out,"-%uu",reg==7&&bytes==1?2u:bytes);
+    fprintf(out,";\n    if(m68k_step_owned_rmw(ctx,_owned_ea,%u,&_owned)){\n",bytes);
+    fwrite(body,1,read.begin,out);fprintf(out,"m68k_step_owned_read%u(&_owned)",read.bits);
+    fwrite(body+read.end,1,write.begin-read.end,out);
+    fprintf(out,"m68k_step_owned_write%u(&_owned,%.*s)",write.bits,(int)(write.close-comma-1),body+comma+1);
+    fwrite(body+write.end,1,(size_t)size-write.end,out);
+    fputs("    }else{\n",out);fwrite(body,1,(size_t)size,out);fputs("    }\n  }\n",out);
+    emitted=!ferror(out);
+done:
+    free(body);if(fclose(buffer))emitted=false;return emitted;
 }
 
 unsigned codegen_step_nominal_cycles(const M68KInstr *ins)
