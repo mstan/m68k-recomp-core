@@ -1076,17 +1076,27 @@ static void emit_cycle_accounting(FILE *f, const char *indent, int cycles)
     fprintf(f, "%sGEN_COSIM_TICK(%d);\n", indent, cycles);
 }
 
+static bool func_is_known(uint32_t addr);
+
+static void emit_static_tail_target(FILE *f,const char *indent,uint32_t addr)
+{
+    if(func_is_known(addr))
+        fprintf(f,"%sRECOMP_TAIL_NATIVE(0x%06Xu,func_%06X);\n",indent,addr,addr);
+    else fprintf(f,"%srecomp_tail_call(0x%06Xu);\n",indent,addr);
+}
+
 static void emit_split_tail_call(FILE *f, const char *indent,
                                  uint32_t target_addr, bool carry_sp_adjust,
                                  int cycles_before) {
     emit_cycle_accounting(f, indent, cycles_before);
     if (carry_sp_adjust) {
         fprintf(f, "%s{ g_split_sp_popped += _sp_popped; _sp_popped = 0;\n", indent);
-        fprintf(f, "%s  recomp_tail_call(0x%06Xu);\n", indent, target_addr);
+        emit_static_tail_target(f,indent,target_addr);
         fprintf(f, "%s  return;\n", indent);
         fprintf(f, "%s}\n", indent);
     } else {
-        fprintf(f, "%srecomp_tail_call(0x%06Xu); return;\n", indent, target_addr);
+        emit_static_tail_target(f,indent,target_addr);
+        fprintf(f,"%sreturn;\n",indent);
     }
 }
 
@@ -2155,7 +2165,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     ret_addr);
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
             if (func_is_known(instr->target_addr))
-                fprintf(f, "    recomp_call_func(func_%06X);\n", instr->target_addr);
+                fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", instr->target_addr);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu);\n", instr->target_addr);
             fprintf(f, "    g_split_sp_popped = _saved_split_sp_popped;\n");
@@ -2177,7 +2187,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         if (instr->has_target) {
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
             if (func_is_known(bsr_target))
-                fprintf(f, "    recomp_call_func(func_%06X);\n", bsr_target);
+                fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", bsr_target);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu); /* JSR target not in func table */\n",
                         bsr_target);
@@ -4546,6 +4556,8 @@ static void emit_decls_preamble(FILE *f) {
     fprintf(f, " * Shared includes + forward decls for the split <prefix>_partNN.c\n");
     fprintf(f, " * translation units (see cmake/GenesisRecompGenerated.cmake). */\n");
     fprintf(f, "#include \"genesis_runtime.h\"\n");
+    fprintf(f, "#ifndef RECOMP_CALL_NATIVE\n#define RECOMP_CALL_NATIVE(fn) recomp_call_func(fn)\n#endif\n");
+    fprintf(f, "#ifndef RECOMP_TAIL_NATIVE\n#define RECOMP_TAIL_NATIVE(addr,fn) recomp_tail_call(addr)\n#endif\n");
     fprintf(f, "#ifndef GEN_NATIVE_SPAN_RETIRED\n#define GEN_NATIVE_SPAN_RETIRED() ((void)0)\n#endif\n");
     fprintf(f, "#ifndef GEN_NATIVE_REGISTER_SPAN_READY\n#define GEN_NATIVE_REGISTER_SPAN_READY(cycles, count) (g_cycle_accumulator<g_vblank_threshold && (cycles)<g_vblank_threshold-g_cycle_accumulator)\n#endif\n");
     fprintf(f, "#include <stdio.h>\n");
@@ -5401,12 +5413,20 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
     }
 
     fprintf(f_dispatch,
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "typedef GenesisNativeCallFrame RecompTailFrame;\n"
+        "GenesisNativeCallFrame *g_recomp_native_frame = NULL;\n"
+        "#define g_recomp_tail_frame g_recomp_native_frame\n"
+        "#define RECOMP_FRAME_INIT {0,0,g_recomp_tail_frame,NULL}\n"
+        "#else\n"
         "typedef struct RecompTailFrame {\n"
         "    int pending;\n"
         "    uint32_t addr;\n"
         "    struct RecompTailFrame *prev;\n"
         "} RecompTailFrame;\n\n"
-        "static RecompTailFrame *g_recomp_tail_frame = NULL;\n\n"
+        "static RecompTailFrame *g_recomp_tail_frame = NULL;\n"
+        "#define RECOMP_FRAME_INIT {0,0,g_recomp_tail_frame}\n"
+        "#endif\n\n"
         "/* The frame list lives on the game fiber's stack and its head is\n"
         " * execution state: fiber snapshots carry it (get/set) and rollback\n"
         " * digests hash it address-free (walk, innermost frame first). */\n"
@@ -5427,6 +5447,9 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "        exit(2);\n"
         "    }\n"
         "    g_recomp_tail_frame->addr = addr & 0xFFFFFFu;\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "    g_recomp_tail_frame->function = NULL;\n"
+        "#endif\n"
         "    g_recomp_tail_frame->pending = 1;\n"
         "}\n\n"
         "static void recomp_dispatch_once(uint32_t addr) {\n"
@@ -5446,7 +5469,12 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "    while (frame->pending) {\n"
         "        uint32_t addr = frame->addr;\n"
         "        frame->pending = 0;\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "        RecompFuncPtr native = frame->function; frame->function = NULL;\n"
+        "        if (native) native(); else recomp_dispatch_once(addr);\n"
+        "#else\n"
         "        recomp_dispatch_once(addr);\n"
+        "#endif\n"
         "        if (g_rte_pending)\n"
         "            break;\n"
         "        if (++guard > 1000000u) {\n"
@@ -5455,17 +5483,22 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "        }\n"
         "    }\n"
         "}\n\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "void recomp_native_drain(GenesisNativeCallFrame *frame) {\n"
+        "    recomp_drain_tailcalls(frame);\n"
+        "}\n"
+        "#endif\n\n"
         "void recomp_call_func(RecompFuncPtr fn) {\n"
         "    if (!fn)\n"
         "        return;\n"
-        "    RecompTailFrame frame = { 0, 0, g_recomp_tail_frame };\n"
+        "    RecompTailFrame frame = RECOMP_FRAME_INIT;\n"
         "    g_recomp_tail_frame = &frame;\n"
         "    fn();\n"
         "    recomp_drain_tailcalls(&frame);\n"
         "    g_recomp_tail_frame = frame.prev;\n"
         "}\n\n"
         "void recomp_call_addr(uint32_t addr) {\n"
-        "    RecompTailFrame frame = { 0, 0, g_recomp_tail_frame };\n"
+        "    RecompTailFrame frame = RECOMP_FRAME_INIT;\n"
         "    g_recomp_tail_frame = &frame;\n"
         "    recomp_tail_call(addr);\n"
         "    recomp_drain_tailcalls(&frame);\n"
