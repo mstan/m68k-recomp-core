@@ -4470,6 +4470,7 @@ static void emit_decls_preamble(FILE *f) {
     fprintf(f, " * translation units (see cmake/GenesisRecompGenerated.cmake). */\n");
     fprintf(f, "#include \"genesis_runtime.h\"\n");
     fprintf(f, "#ifndef GEN_NATIVE_SPAN_RETIRED\n#define GEN_NATIVE_SPAN_RETIRED() ((void)0)\n#endif\n");
+    fprintf(f, "#ifndef GEN_NATIVE_REGISTER_SPAN_READY\n#define GEN_NATIVE_REGISTER_SPAN_READY(cycles, count) (g_cycle_accumulator<g_vblank_threshold && (cycles)<g_vblank_threshold-g_cycle_accumulator)\n#endif\n");
     fprintf(f, "#include <stdio.h>\n");
     fprintf(f, "#include <stdlib.h>\n");
     if (s_reverse_debug) {
@@ -5078,9 +5079,9 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                  * no jump can bypass the function's fall-through tail call. */
                 if(count>=2 && j+(int)count<instrs.count && instrs.addrs[j+(int)count]==next) {
                     fprintf(f_func,"#ifndef GENESIS_COSIM\n"
-                        "  if(g_cycle_accumulator<g_vblank_threshold && %uu<g_vblank_threshold-g_cycle_accumulator){\n",total);
+                        "  if(GEN_NATIVE_REGISTER_SPAN_READY(%uu,%uu)){\n",total,count);
                     if(!codegen_emit_register_span(f_func,rom,span,count))return false;
-                    fprintf(f_func,"    GEN_NATIVE_SPAN_RETIRED(); g_native_insn_count+=%uu; g_cycle_accumulator+=%uu; g_audio_cycle_counter+=%uu;\n"
+                    fprintf(f_func,"    g_native_insn_count+=%uu; g_cycle_accumulator+=%uu; g_audio_cycle_counter+=%uu; GEN_NATIVE_SPAN_RETIRED();\n"
                                    "    goto label_%06X;\n  }\n#endif\n",count,total,total,next);
                     addrset_insert(&labels,next);register_span_end=next;
                 }
