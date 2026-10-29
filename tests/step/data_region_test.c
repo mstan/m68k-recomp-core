@@ -119,6 +119,20 @@ int main(void)
     CHECK(m68k_step_data_regions(&c,resolve));
     CHECK(m68k_step_execute(&c,&entry)==M68K_STEP_OK&&!f.resolves&&f.reads==4&&f.writes==2);
     CHECK(m68k_step_execute_live(&c,operation)==M68K_STEP_OK&&!f.resolves);
+    /* Current-build CPU/guest-memory restore never imports derived views. */
+    setup(&f,&c);CHECK(m68k_step_data_regions(&c,resolve));
+    M68kStepState saved=c.state;
+    CHECK(m68k_step_execute_tracked(&c,&entry)==M68K_STEP_OK&&f.resolves==2);
+    f.bank=1;
+    for(unsigned n=0;n<32;++n)f.banked[1][n]=(uint8_t)(n*11u+9u);
+    c.state=saved;
+    Fixture expected=f;M68kStepContext ordinary;
+    m68k_step_init(&ordinary,&c.bus,&expected);expected.cpu=&ordinary;ordinary.state=saved;
+    CHECK(m68k_step_execute(&ordinary,&entry)==M68K_STEP_OK);
+    CHECK(m68k_step_execute_tracked(&c,&entry)==M68K_STEP_OK&&f.resolves==4);
+    CHECK(!memcmp(&ordinary.state,&c.state,sizeof saved));
+    CHECK(!memcmp(expected.banked,f.banked,sizeof f.banked));
+    CHECK(!c.data_active&&!c.data_read.data&&!c.data_write.data);
     printf("Owned data regions: %u matched CPU/memory/fault/WAIT/MMIO/reset/trace cases pass\n",cases);
     return 0;
 }
