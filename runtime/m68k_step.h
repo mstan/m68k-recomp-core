@@ -49,6 +49,13 @@ typedef struct {
     void (*reset_devices)(void *);
 } M68kStepBus;
 
+typedef struct {
+    uint32_t address;
+    size_t bytes;
+    uint8_t *data;
+} M68kStepDataRegion;
+typedef int (*M68kStepDataResolver)(void *,uint32_t,size_t,int,M68kStepDataRegion *);
+
 typedef struct M68kStepContext {
     M68kStepState state;
     M68kStepBus bus;
@@ -63,6 +70,16 @@ typedef struct M68kStepContext {
      * The view is consumed immediately, never cached across instructions.
      * Appended so existing generated operation prefix offsets stay unchanged. */
     const uint8_t *(*code_span)(void *,uint32_t,size_t);
+    /* Optional ordinary-byte memory ownership for independently qualified
+     * context-bus operations. A complete view has one permission and no bus
+     * side effects; it must remain valid until the next bus callback or end
+     * of this operation. Resolver must not reenter or invoke observers.
+     * MMIO, ownership WAIT, ignored writes and noncontiguous storage return0.
+     * These derived views never survive an operation, fault or callback.
+     * Read/write permissions are independent; no instruction guard elision. */
+    M68kStepDataResolver data_region;
+    M68kStepDataRegion data_read,data_write;
+    unsigned data_active;
 } M68kStepContext;
 #define M68K_STEP_HAS_CODE_SPANS 1
 typedef const uint8_t *(*M68kStepCodeSpan)(void *,uint32_t,size_t);
@@ -85,8 +102,9 @@ typedef struct {
     size_t count;
 } M68kStepModule;
 
-/* Optional immutable parallel effect metadata; no change to old catalog or
- * operation-object ABI. Zero/absent means an arbitrary observable callback. */
+/* Optional immutable parallel REGISTER/TRACKED_BUS flags. Old boolean arrays
+ * remain valid; catalog/operation-object ABI stays unchanged. Zero/absent
+ * means an arbitrary observable callback. */
 typedef struct {
     const M68kStepModule *module;
     const uint8_t *register_only;
@@ -96,8 +114,15 @@ void m68k_step_init(M68kStepContext *,const M68kStepBus *,void *user);
 /* Configure between completed operations. The ordinary fetch16 is still
  * required; unsupported ranges always retain the original portable path. */
 int m68k_step_code_span(M68kStepContext *,M68kStepCodeSpan);
+int m68k_step_data_regions(M68kStepContext *,M68kStepDataResolver);
+#define M68K_STEP_HAS_DATA_REGIONS 1
 M68kStepResult m68k_step_reset(M68kStepContext *);
 M68kStepResult m68k_step_execute(M68kStepContext *,const M68kStepEntry *);
+/* The caller independently proves all external effects use this context's
+ * bus/state helpers. Arbitrary HLE must use ordinary execute/execute_live.
+ * Only this entry point may reuse optional owned data views. */
+enum { M68K_STEP_EFFECT_REGISTER=1,M68K_STEP_EFFECT_TRACKED_BUS=2 };
+M68kStepResult m68k_step_execute_tracked(M68kStepContext *,const M68kStepEntry *);
 /* A region may use this only for independently qualified operations that
  * access registers/charge exclusively: no bus, callbacks, exceptions, stopped
  * state or external storage. Unknown operations retain m68k_step_execute.
