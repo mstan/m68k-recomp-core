@@ -169,6 +169,14 @@ typedef struct {
 } M68kStepRegisterSpan;
 M68kStepResult m68k_step_execute_span(M68kStepContext *,const M68kStepRegisterSpan *,uint64_t cycle_budget);
 #define M68K_STEP_HAS_REGISTER_SPANS 1
+/* Same immutable metadata layout, distinct execution contract: a fixed pure
+ * register prefix ends in one independently proved bus-free control operation.
+ * cycles is the MAXIMUM total charge. execute materializes D/A/CCR, terminal
+ * PC and terminal charge; all prefix charges remain fixed. Current bytes and
+ * the caller's exact no-observer budget still guard every attempt. */
+typedef M68kStepRegisterSpan M68kStepFlowSpan;
+M68kStepResult m68k_step_execute_flow_span(M68kStepContext *,const M68kStepFlowSpan *,uint64_t cycle_budget);
+#define M68K_STEP_HAS_FLOW_SPANS 1
 /* Runtime correctness floors use the same exception/WAIT/trace boundary.
  * The callback decodes current bytes and sets PC/charge; no stale entry or
  * process-global CPU binding is used. Unsupported semantics must halt. */

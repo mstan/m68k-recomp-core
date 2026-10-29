@@ -88,3 +88,8 @@ bool codegen_register_instruction(const M68KInstr *, unsigned *flags_read,
                                   unsigned *flags_written);
 bool codegen_emit_register_span(FILE *, const GenesisRom *, const M68KInstr *,
                                 unsigned count);
+/* Fixed-register prefix followed by a bus-free PC/variable-charge terminal.
+ * Full ordinary-body/priority proof and worst-case observer admission belong
+ * to the consumer. Existing fixed-span emission and ABI remain unchanged. */
+bool codegen_flow_terminal(const M68KInstr *,unsigned *maximum_cycles);
+bool codegen_emit_flow_span(FILE *,const GenesisRom *,const M68KInstr *,unsigned count);
