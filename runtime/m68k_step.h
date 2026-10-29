@@ -133,6 +133,21 @@ M68kStepResult m68k_step_execute_tracked(M68kStepContext *,const M68kStepEntry *
  * and reentry always retain the ordinary observable instruction boundary. */
 M68kStepResult m68k_step_execute_register(M68kStepContext *,const M68kStepEntry *);
 #define M68K_STEP_HAS_REGISTER_REGIONS 1
+/* A generated straight-line register-only span. All entries are independently
+ * qualified, fixed-cycle canonical operations in their original lookup order.
+ * execute owns only D/A/CCR and materializes them before returning. Configure
+ * immutable spans between operations; no bus/HLE/control/privilege callbacks.
+ * Caller supplies a conservative cycle budget before ANY CPU/device observer;
+ * full current bytes are checked on every attempt, with no cached identity.
+ */
+enum { M68K_STEP_REGISTER_SPAN_MAX=8 };
+typedef struct {
+    const M68kStepEntry *const *entries;
+    M68kStepOperation execute;
+    unsigned count,cycles;
+} M68kStepRegisterSpan;
+M68kStepResult m68k_step_execute_span(M68kStepContext *,const M68kStepRegisterSpan *,uint64_t cycle_budget);
+#define M68K_STEP_HAS_REGISTER_SPANS 1
 /* Runtime correctness floors use the same exception/WAIT/trace boundary.
  * The callback decodes current bytes and sets PC/charge; no stale entry or
  * process-global CPU binding is used. Unsupported semantics must halt. */

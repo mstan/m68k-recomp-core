@@ -31,6 +31,10 @@
 static const char      *s_diag_func_name = NULL;
 static uint32_t         s_diag_func_addr = 0;
 static const M68KInstr *s_diag_instr     = NULL;
+/* Active only while emitting a proven unobservable register span. Ordinary
+ * instruction emission retains every architectural flag write. */
+static bool s_span_flags = false;
+static unsigned s_span_live_flags = 31;
 
 /* =========================================================================
  * AddrSet — simple sorted dynamic array of uint32_t addresses
@@ -741,6 +745,14 @@ static void emit_ea_store(FILE *f, const M68KInstr *instr, int ea, M68KSize sz,
 static void emit_flags_logic(FILE *f, const char *expr, M68KSize sz) {
     /* MOVE-like: set N,Z; clear V,C.  Do NOT clear X (extend). */
     int bits = size_bits(sz);
+    if (s_span_flags) {
+        unsigned mask = s_span_live_flags & 15u;
+        if (mask)
+            fprintf(f, "  { uint%d_t _fv=(uint%d_t)(%s); g_cpu.SR=(uint16_t)((g_cpu.SR&~%uu)|"
+                       "(((!_fv?4u:0u)|((_fv>>%d)?8u:0u))&%uu)); }\n",
+                    bits, bits, expr, mask, bits-1, mask);
+        return;
+    }
     fprintf(f,
         "  { uint%d_t _fv = (uint%d_t)(%s);\n"
         "    g_cpu.SR &= ~(0x0Fu);\n"
@@ -751,8 +763,29 @@ static void emit_flags_logic(FILE *f, const char *expr, M68KSize sz) {
         bits - 1, SR_N);
 }
 
+static void emit_span_flags_arith(FILE *f, const char *a, const char *b,
+                                  const char *res, M68KSize sz, bool subtract,
+                                  unsigned written)
+{
+    unsigned mask=s_span_live_flags&written;
+    if (!mask) return;
+    int bits=size_bits(sz);
+    uint32_t sign=bits==32?0x80000000u:1u<<(bits-1);
+    uint32_t top=bits==32?0xffffffffu:(1u<<bits)-1u;
+    fprintf(f,"  { uint%d_t _fa=(uint%d_t)(%s), _fb=(uint%d_t)(%s), _fr=(uint%d_t)(%s);\n",
+            bits,bits,a,bits,b,bits,res);
+    if(subtract) fputs("    unsigned _fc=(uint32_t)_fb>(uint32_t)_fa;\n",f);
+    else fprintf(f,"    unsigned _fc=(uint64_t)_fa+(uint64_t)_fb>0x%08Xu;\n",top);
+    fprintf(f,"    unsigned _fv=%s((_fa^_fb)&0x%08Xu)&&((_fa^_fr)&0x%08Xu);\n",
+            subtract?"":"!",sign,sign);
+    fprintf(f,"    g_cpu.SR=(uint16_t)((g_cpu.SR&~%uu)|(((!_fr?4u:0u)|"
+              "((_fr>>%d)?8u:0u)|(_fc?%uu:0u)|(_fv?2u:0u))&%uu)); }\n",
+            mask,bits-1,(written&16u)?17u:1u,mask);
+}
+
 static void emit_flags_add(FILE *f, const char *a, const char *b,
                             const char *res, M68KSize sz) {
+    if(s_span_flags){emit_span_flags_arith(f,a,b,res,sz,false,31);return;}
     int bits = size_bits(sz);
     /* Carry is detected by widening to 64-bit before addition; a 32-bit
      * sum wraps so the previous "(uint32_t)_fa + (uint32_t)_fb > 0xFFFFFFFFu"
@@ -775,6 +808,7 @@ static void emit_flags_add(FILE *f, const char *a, const char *b,
 
 static void emit_flags_sub(FILE *f, const char *a, const char *b,
                             const char *res, M68KSize sz) {
+    if(s_span_flags){emit_span_flags_arith(f,a,b,res,sz,true,31);return;}
     int bits = size_bits(sz);
     fprintf(f,
         "  { uint%d_t _fa = (uint%d_t)(%s), _fb = (uint%d_t)(%s), _fr = (uint%d_t)(%s);\n"
@@ -795,6 +829,7 @@ static void emit_flags_sub(FILE *f, const char *a, const char *b,
 /* CMP: same as SUB flags but does NOT affect X (extend). */
 static void emit_flags_cmp(FILE *f, const char *a, const char *b,
                             const char *res, M68KSize sz) {
+    if(s_span_flags){emit_span_flags_arith(f,a,b,res,sz,true,15);return;}
     int bits = size_bits(sz);
     fprintf(f,
         "  { uint%d_t _fa = (uint%d_t)(%s), _fb = (uint%d_t)(%s), _fr = (uint%d_t)(%s);\n"
@@ -4293,6 +4328,141 @@ unsigned codegen_step_nominal_cycles(const M68KInstr *ins)
     return ins && ins->word_count ? (unsigned)estimate_cycles_prm(ins) : 0;
 }
 
+static bool span_value_ea(int ea)
+{ return ea>=0 && (ea<16 || ea==0x3c); }
+
+bool codegen_register_instruction(const M68KInstr *ins,unsigned *read,unsigned *written)
+{
+    unsigned r=0,w=0;
+    if(!ins || !ins->word_count || m68k_validate(ins,NULL)!=M68K_LEGAL)return false;
+    switch(ins->mnemonic) {
+    case MN_NOP: break;
+    case MN_MOVE:
+        if(!span_value_ea(ins->src_ea) || ins->dst_ea<0 || ins->dst_ea>=8)return false;
+        w=15;break;
+    case MN_MOVEA: case MN_ADDA: case MN_SUBA:
+        if(!span_value_ea(ins->src_ea))return false;
+        break;
+    case MN_MOVEQ: case MN_SWAP: case MN_EXT: w=15;break;
+    case MN_LEA:
+        /* Address arithmetic only: includes constant/PC-relative and brief
+         * indexed EAs, never dereferences guest memory. */
+        if((ins->src_ea>>3)<2 || (ins->src_ea>>3)==3 || (ins->src_ea>>3)==4 ||
+           ins->src_ea>0x3b)return false;
+        break;
+    case MN_ADD: case MN_SUB:
+        if(!span_value_ea(ins->src_ea) ||
+           ((ins->words[0]&0x100u) && ins->src_ea>=8))return false;
+        w=31;break;
+    case MN_ADDQ: case MN_SUBQ:
+        if(ins->src_ea<0 || ins->src_ea>=16)return false;
+        w=ins->src_ea<8?31u:0u;break;
+    case MN_ADDI: case MN_SUBI: case MN_NEG:
+        if(ins->src_ea<0 || ins->src_ea>=8)return false;
+        w=31;break;
+    case MN_AND: case MN_OR: case MN_EOR:
+        if(!span_value_ea(ins->src_ea) ||
+           ((ins->words[0]&0x100u) && ins->src_ea>=8))return false;
+        w=15;break;
+    case MN_ANDI: case MN_ORI: case MN_EORI: case MN_CMPI:
+    case MN_NOT: case MN_TST: case MN_CLR:
+        if(ins->src_ea<0 || ins->src_ea>=8)return false;
+        w=15;break;
+    case MN_CMP: case MN_CMPA:
+        if(!span_value_ea(ins->src_ea))return false;
+        w=15;break;
+    case MN_ADDX: case MN_SUBX:
+        if(ins->predec_mem_form)return false;
+        r=20;w=31;break; /* X and sticky Z are inputs, not dead writes. */
+    case MN_NEGX:
+        if(ins->src_ea<0 || ins->src_ea>=8)return false;
+        r=20;w=31;break;
+    case MN_ABCD: case MN_SBCD:
+        if(ins->predec_mem_form)return false;
+        r=31;break; /* Conservatively retain all incoming undefined flags. */
+    case MN_NBCD:
+        if(ins->src_ea<0 || ins->src_ea>=8)return false;
+        r=31;break;
+    case MN_EXG: break;
+    default: return false;
+    }
+    if(read)*read=r;
+    if(written)*written=w;
+    return true;
+}
+
+/* Replace only canonical register tokens from the common emitter. No textual
+ * expression optimization: the host compiler sees one straight-line SSA-like
+ * region, so adjacent LEAs/address adds fold without repeating global stores.
+ */
+static unsigned span_register_token(const char *p,unsigned *length)
+{
+    if(strncmp(p,"g_cpu.",6))return 0;
+    if((p[6]=='D'||p[6]=='A') && p[7]=='[' && p[8]>='0' && p[8]<='7' && p[9]==']') {
+        *length=10;return 1u<<((p[6]=='D'?0:8)+(unsigned)(p[8]-'0'));
+    }
+    if(!strncmp(p+6,"SR",2)){*length=8;return 1u<<16;}
+    return 0;
+}
+static void span_local_name(FILE *f,unsigned bit)
+{
+    unsigned index=0;while((1u<<index)!=bit)++index;
+    if(index==16)fputs("_spanSR",f);
+    else fprintf(f,"_span%c%u",index<8?'D':'A',index&7u);
+}
+
+bool codegen_emit_register_span(FILE *out,const GenesisRom *rom,const M68KInstr *ins,unsigned count)
+{
+    if(!out || !rom || !ins || count<2 || count>CODEGEN_REGISTER_SPAN_MAX)return false;
+    unsigned live[CODEGEN_REGISTER_SPAN_MAX],need=31;
+    for(unsigned n=count;n--;) {
+        unsigned read,written;
+        if(!codegen_register_instruction(&ins[n],&read,&written) ||
+           (n && ins[n-1].addr+ins[n-1].byte_length!=ins[n].addr))return false;
+        live[n]=need;need=(need&~written)|read;
+    }
+    FILE *buffer=tmpfile();if(!buffer)return false;
+    bool old_active=s_span_flags;unsigned old_live=s_span_live_flags;
+    s_span_flags=true;
+    bool okay=true;
+    for(unsigned n=0;n<count;++n) {
+        s_span_live_flags=live[n];fputs("  {\n",buffer);
+        if(!codegen_emit_step_semantics(buffer,rom,&ins[n])){okay=false;break;}
+        fputs("  }\n",buffer);
+    }
+    s_span_flags=old_active;s_span_live_flags=old_live;
+    if(fflush(buffer) || ferror(buffer))okay=false;
+    long size=ftell(buffer);
+    char *text=size>=0?malloc((size_t)size+1u):NULL;
+    if(!text)okay=false;
+    if(okay && (fseek(buffer,0,SEEK_SET) || fread(text,1,(size_t)size,buffer)!=(size_t)size))okay=false;
+    if(fclose(buffer))okay=false;
+    if(!okay){free(text);return false;}
+    text[size]=0;
+    unsigned used=0;
+    for(const char *p=text;*p;) {
+        unsigned length=0,bit=span_register_token(p,&length);
+        used|=bit;p+=bit?length:1;
+    }
+    fputs("  { /* unobservable fixed-cycle register span */\n",out);
+    for(unsigned n=0;n<17;++n)if(used&(1u<<n)) {
+        fprintf(out,"    %s ",n==16?"uint16_t":"uint32_t");span_local_name(out,1u<<n);
+        if(n==16)fputs("=g_cpu.SR;\n",out);
+        else fprintf(out,"=g_cpu.%c[%u];\n",n<8?'D':'A',n&7u);
+    }
+    for(const char *p=text;*p;) {
+        unsigned length=0,bit=span_register_token(p,&length);
+        if(bit){span_local_name(out,bit);p+=length;}
+        else fputc(*p++,out);
+    }
+    for(unsigned n=0;n<17;++n)if(used&(1u<<n)) {
+        if(n==16)fputs("    g_cpu.SR=",out);
+        else fprintf(out,"    g_cpu.%c[%u]=",n<8?'D':'A',n&7u);
+        span_local_name(out,1u<<n);fputs(";\n",out);
+    }
+    fputs("  }\n",out);free(text);return !ferror(out);
+}
+
 static void emit_decls_preamble(FILE *f) {
     fprintf(f, "#pragma once\n");
     fprintf(f, "/* <prefix>_decls.h — AUTO-GENERATED by GenesisRecomp. DO NOT EDIT.\n");
@@ -4863,6 +5033,7 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         }
 
         bool skip_until_label = false;
+        uint32_t register_span_end = 0;
 
         for (int j = 0; j < instrs.count; j++) {
             uint32_t pc = instrs.addrs[j];
@@ -4883,6 +5054,35 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             if (!m68k_decode(rom, pc, &instr)) {
                 fprintf(f_func, "  /* decode error @ $%06X */\n", pc);
                 continue;
+            }
+
+            /* Ordinary labels/aliases remain entry points into the original
+             * instruction stream. A fast span never crosses one, a game hook,
+             * reverse-debug observation or stack-unwind bookkeeping. It owns
+             * state only while the ENTIRE fixed-cycle span is before the next
+             * interrupt/watchdog boundary. The original path handles crossings
+             * and every co-simulation checkpoint at the precise instruction. */
+            if(!s_reverse_debug && !has_sp_adjust && pc>=register_span_end) {
+                M68KInstr span[CODEGEN_REGISTER_SPAN_MAX];
+                unsigned count=0,total=0;uint32_t next=pc;
+                while(count<CODEGEN_REGISTER_SPAN_MAX && j+(int)count<instrs.count) {
+                    uint32_t at=instrs.addrs[j+(int)count];
+                    M68KInstr candidate;
+                    if(at!=next || (count && addrset_contains(&labels,at)) || ws_site_for(at) ||
+                       !m68k_decode(rom,at,&candidate) || !codegen_register_instruction(&candidate,NULL,NULL))break;
+                    int cost=estimate_cycles_prm(&candidate);if(cost<=0)break;
+                    span[count++]=candidate;total+=(unsigned)cost;next=at+candidate.byte_length;
+                }
+                /* A real following instruction supplies the original label;
+                 * no jump can bypass the function's fall-through tail call. */
+                if(count>=2 && j+(int)count<instrs.count && instrs.addrs[j+(int)count]==next) {
+                    fprintf(f_func,"#ifndef GENESIS_COSIM\n"
+                        "  if(g_cycle_accumulator<g_vblank_threshold && %uu<g_vblank_threshold-g_cycle_accumulator){\n",total);
+                    if(!codegen_emit_register_span(f_func,rom,span,count))return false;
+                    fprintf(f_func,"    g_native_insn_count+=%uu; g_cycle_accumulator+=%uu; g_audio_cycle_counter+=%uu;\n"
+                                   "    goto label_%06X;\n  }\n#endif\n",count,total,total,next);
+                    addrset_insert(&labels,next);register_span_end=next;
+                }
             }
 
             /* "Wait for IRQ-cleared flag" idiom — generalization of

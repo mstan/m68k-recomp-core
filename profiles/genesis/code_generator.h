@@ -66,3 +66,17 @@ bool codegen_emit_step_operation(FILE *out, const GenesisRom *rom,
  * shifts and conditional sets override it in the emitted operation. Multiply/
  * divide still use documented nominal costs until independently qualified. */
 unsigned codegen_step_nominal_cycles(const M68KInstr *instruction);
+
+/* Closed, fixed-cycle register-only sequence ABI shared by both frontends.
+ * No bus, control transfer, SR-mask change, callback or exception is admitted.
+ * The caller proves the complete sequence lies before its next observable
+ * boundary and guards current bytes where code is mutable. Output owns only
+ * D/A/CCR locally and materializes them before returning to the caller; PC,
+ * retirement diagnostics and grouped clocks remain the caller's contract.
+ * Unknown instructions are ordinary-path exits. No output on rejection.
+ */
+#define CODEGEN_REGISTER_SPAN_MAX 8
+bool codegen_register_instruction(const M68KInstr *, unsigned *flags_read,
+                                  unsigned *flags_written);
+bool codegen_emit_register_span(FILE *, const GenesisRom *, const M68KInstr *,
+                                unsigned count);
