@@ -1076,17 +1076,35 @@ static void emit_cycle_accounting(FILE *f, const char *indent, int cycles)
     fprintf(f, "%sGEN_COSIM_TICK(%d);\n", indent, cycles);
 }
 
-static void emit_split_tail_call(FILE *f, const char *indent,
+static bool func_is_known(uint32_t addr);
+
+/* Discovery may promote an external/RAM target into the function table.
+ * Membership alone cannot bypass live RAM trampoline/stub resolution. */
+static bool func_is_native_rom(const GenesisRom *rom,uint32_t addr)
+{
+    return rom && rom->rom_data && !rom->read8_override && rom->rom_size>=2 &&
+           !(addr&1u) && addr<=rom->rom_size-2u && func_is_known(addr);
+}
+
+static void emit_static_tail_target(FILE *f,const GenesisRom *rom,const char *indent,uint32_t addr)
+{
+    if(func_is_native_rom(rom,addr))
+        fprintf(f,"%sRECOMP_TAIL_NATIVE(0x%06Xu,func_%06X);\n",indent,addr,addr);
+    else fprintf(f,"%srecomp_tail_call(0x%06Xu);\n",indent,addr);
+}
+
+static void emit_split_tail_call(FILE *f, const GenesisRom *rom,const char *indent,
                                  uint32_t target_addr, bool carry_sp_adjust,
                                  int cycles_before) {
     emit_cycle_accounting(f, indent, cycles_before);
     if (carry_sp_adjust) {
         fprintf(f, "%s{ g_split_sp_popped += _sp_popped; _sp_popped = 0;\n", indent);
-        fprintf(f, "%s  recomp_tail_call(0x%06Xu);\n", indent, target_addr);
+        emit_static_tail_target(f,rom,indent,target_addr);
         fprintf(f, "%s  return;\n", indent);
         fprintf(f, "%s}\n", indent);
     } else {
-        fprintf(f, "%srecomp_tail_call(0x%06Xu); return;\n", indent, target_addr);
+        emit_static_tail_target(f,rom,indent,target_addr);
+        fprintf(f,"%sreturn;\n",indent);
     }
 }
 
@@ -2154,8 +2172,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             fprintf(f, "  recomp_push_return(0x%06Xu); /* JSR push (callee captures return) */\n",
                     ret_addr);
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
-            if (func_is_known(instr->target_addr))
-                fprintf(f, "    recomp_call_func(func_%06X);\n", instr->target_addr);
+            if (func_is_native_rom(rom,instr->target_addr))
+                fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", instr->target_addr);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu);\n", instr->target_addr);
             fprintf(f, "    g_split_sp_popped = _saved_split_sp_popped;\n");
@@ -2176,8 +2194,8 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
 
         if (instr->has_target) {
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
-            if (func_is_known(bsr_target))
-                fprintf(f, "    recomp_call_func(func_%06X);\n", bsr_target);
+            if (func_is_native_rom(rom,bsr_target))
+                fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", bsr_target);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu); /* JSR target not in func table */\n",
                         bsr_target);
@@ -2255,7 +2273,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
                 fprintf(f, "  goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "  ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"  ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         } else if (mode == 2 || mode == 5 || mode == 6 ||
@@ -2377,7 +2395,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
                 fprintf(f, "  goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "  ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"  ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         } else {
@@ -2451,7 +2469,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     fprintf(f, "  if (%s) {\n", ce);
                     emit_cycle_accounting(f, "    ", estimate_cycles(instr));
                     fprintf(f, "    glue_yield_for_interrupt_poll();\n");
-                    emit_split_tail_call(f, "    ", instr->target_addr, *has_sp_adjust != 0,
+                    emit_split_tail_call(f, rom,"    ", instr->target_addr, *has_sp_adjust != 0,
                                          -1);
                     fprintf(f, "  }\n");
                 }
@@ -2463,7 +2481,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  }\n");
             } else {
                 fprintf(f, "  if (%s) {\n", ce);
-                emit_split_tail_call(f, "    ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"    ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
                 fprintf(f, "  }\n");
             }
@@ -2492,7 +2510,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "      ", estimate_cycles(instr));
                 fprintf(f, "      goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "      ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"      ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         }
@@ -4540,12 +4558,49 @@ bool codegen_emit_register_span(FILE *out,const GenesisRom *rom,const M68KInstr 
     fputs("  }\n",out);free(text);return !ferror(out);
 }
 
+bool codegen_flow_terminal(const M68KInstr *ins,unsigned *maximum)
+{
+    if(!ins || !ins->word_count || ins->word_count>M68K_MAX_WORDS ||
+       ins->byte_length!=(unsigned)ins->word_count*2u ||
+       (ins->addr&1u) || ins->addr>0xffffffu)return false;
+    unsigned cycles;
+    switch(ins->mnemonic) {
+    case MN_BRA:if(!ins->has_target || ins->word_count>2)return false;cycles=10;break;
+    case MN_Bcc:if(!ins->has_target || ins->word_count>2)return false;cycles=ins->word_count==1?10u:12u;break;
+    case MN_DBcc:if(!ins->has_target || ins->word_count!=2)return false;cycles=14;break;
+    case MN_JMP:
+        if(ins->src_ea<0 || ins->src_ea>63)return false;
+        cycles=step_jump_cost((unsigned)ins->src_ea,false);
+        if(!cycles)return false;
+        break;
+    default:return false;
+    }
+    if(maximum)*maximum=cycles;
+    return true;
+}
+bool codegen_emit_flow_span(FILE *f,const GenesisRom *rom,const M68KInstr *ins,unsigned count)
+{
+    if(!f || !rom || !ins || count<2 || count>CODEGEN_REGISTER_SPAN_MAX ||
+       !codegen_flow_terminal(&ins[count-1],NULL))return false;
+    for(unsigned n=0;n<count-1;++n)
+        if(!codegen_register_instruction(&ins[n],NULL,NULL) ||
+           ins[n].addr+ins[n].byte_length!=ins[n+1].addr)return false;
+    /* Final prefix flags remain live for the control condition. Publishing
+     * prefix locals before its exact terminal body also preserves DBcc and
+     * register-indexed target dependencies. No observer can occur here. */
+    return (count==2?codegen_emit_step_operation(f,rom,ins):
+            codegen_emit_register_span(f,rom,ins,count-1)) &&
+           codegen_emit_step_operation(f,rom,&ins[count-1]);
+}
+
 static void emit_decls_preamble(FILE *f) {
     fprintf(f, "#pragma once\n");
     fprintf(f, "/* <prefix>_decls.h — AUTO-GENERATED by GenesisRecomp. DO NOT EDIT.\n");
     fprintf(f, " * Shared includes + forward decls for the split <prefix>_partNN.c\n");
     fprintf(f, " * translation units (see cmake/GenesisRecompGenerated.cmake). */\n");
     fprintf(f, "#include \"genesis_runtime.h\"\n");
+    fprintf(f, "#ifndef RECOMP_CALL_NATIVE\n#define RECOMP_CALL_NATIVE(fn) recomp_call_func(fn)\n#endif\n");
+    fprintf(f, "#ifndef RECOMP_TAIL_NATIVE\n#define RECOMP_TAIL_NATIVE(addr,fn) recomp_tail_call(addr)\n#endif\n");
     fprintf(f, "#ifndef GEN_NATIVE_SPAN_RETIRED\n#define GEN_NATIVE_SPAN_RETIRED() ((void)0)\n#endif\n");
     fprintf(f, "#ifndef GEN_NATIVE_REGISTER_SPAN_READY\n#define GEN_NATIVE_REGISTER_SPAN_READY(cycles, count) (g_cycle_accumulator<g_vblank_threshold && (cycles)<g_vblank_threshold-g_cycle_accumulator)\n#endif\n");
     fprintf(f, "#include <stdio.h>\n");
@@ -4578,6 +4633,7 @@ static void emit_decls_preamble(FILE *f) {
 typedef struct {
     char   *data;
     size_t  size;
+    uint32_t address;
 } PartBuf;
 
 static PartBuf *s_part_bufs      = NULL;
@@ -4586,12 +4642,13 @@ static int      s_part_buf_cap   = 0;
 
 /* Reads back everything written to `tmp`, appends it as a new buffered
  * function body, and closes `tmp` (tmpfile()s are unlinked on close). */
-static void part_buf_push(FILE *tmp) {
+static void part_buf_push(FILE *tmp,uint32_t address) {
     long sz = ftell(tmp);
     if (sz < 0) sz = 0;
     rewind(tmp);
-    char *buf = (char *)malloc((size_t)(sz > 0 ? sz : 1));
+    char *buf = (char *)malloc((size_t)(sz > 0 ? sz : 0)+1u);
     size_t rd = (sz > 0 && buf) ? fread(buf, 1, (size_t)sz, tmp) : 0;
+    if(buf)buf[rd]=0;
     fclose(tmp);
     if (s_part_buf_count == s_part_buf_cap) {
         s_part_buf_cap = s_part_buf_cap ? s_part_buf_cap * 2 : 256;
@@ -4600,7 +4657,91 @@ static void part_buf_push(FILE *tmp) {
     }
     s_part_bufs[s_part_buf_count].data = buf;
     s_part_bufs[s_part_buf_count].size = rd;
+    s_part_bufs[s_part_buf_count].address = address;
     s_part_buf_count++;
+}
+
+typedef struct {int from,to;size_t target_size;} PartEdge;
+typedef struct {int root;size_t size;uint32_t address;} PartGroup;
+static int part_edge_compare(const void *a,const void *b)
+{
+    const PartEdge*x=a,*y=b;
+    if(x->target_size!=y->target_size)return x->target_size<y->target_size?-1:1;
+    if(x->from!=y->from)return x->from<y->from?-1:1;
+    return x->to<y->to?-1:x->to!=y->to;
+}
+static int part_group_compare(const void *a,const void *b)
+{
+    const PartGroup*x=a,*y=b;
+    if(x->size!=y->size)return x->size>y->size?-1:1;
+    return x->address<y->address?-1:x->address!=y->address;
+}
+static int part_root(int *parent,int n)
+{while(parent[n]!=n){parent[n]=parent[parent[n]];n=parent[n];}return n;}
+static int part_find(uint32_t address)
+{
+    int lo=0,hi=s_part_buf_count;
+    while(lo<hi){int mid=lo+(hi-lo)/2;if(s_part_bufs[mid].address<address)lo=mid+1;else hi=mid;}
+    return lo<s_part_buf_count&&s_part_bufs[lo].address==address?lo:-1;
+}
+/* Direct native edges expose compiler inlining only when both definitions
+ * share a TU. Keep complete canonical bodies/alias wrappers byte-identical,
+ * cluster small callees within a bounded size, then balance whole clusters.
+ * No profile, semantic substitution or unbounded monolithic TU is required.
+ * Allocation failure retains the previous portable address-order layout. */
+static bool part_buf_callgraph(FILE **parts,const AddrSet *functions,const uint32_t *owners)
+{
+    int count=s_part_buf_count;size_t edge_count=0,edge_capacity=0,total=0;
+    PartEdge *edges=NULL;int *parent=malloc((size_t)count*sizeof*parent);
+    int *head=malloc((size_t)count*sizeof*head),*next=malloc((size_t)count*sizeof*next);
+    size_t *sizes=malloc((size_t)count*sizeof*sizes);
+    PartGroup *groups=malloc((size_t)count*sizeof*groups);
+    bool ready=false;
+    if(!count || !parent || !head || !next || !sizes || !groups)goto done;
+    for(int n=0;n<count;++n){parent[n]=n;head[n]=-1;sizes[n]=s_part_bufs[n].size;total+=sizes[n];}
+    for(int n=0;n<count;++n)for(unsigned kind=0;kind<2;++kind){
+        const char *marker=kind?"RECOMP_TAIL_NATIVE(":"RECOMP_CALL_NATIVE(";
+        const char *at=s_part_bufs[n].data;
+        while(at && (at=strstr(at,marker))!=NULL){
+            at+=strlen(marker);const char *symbol=strstr(at,"func_");
+            const char *end=strchr(at,')');
+            if(!symbol || !end || symbol>end)continue;
+            char *tail;uint32_t address=(uint32_t)strtoul(symbol+5,&tail,16);
+            if(tail!=symbol+11)continue;
+            int lo=0,hi=functions->count;
+            while(lo<hi){int mid=lo+(hi-lo)/2;if(functions->addrs[mid]<address)lo=mid+1;else hi=mid;}
+            if(lo==functions->count || functions->addrs[lo]!=address)continue;
+            int target=part_find(owners[lo]);if(target<0 || target==n)continue;
+            if(edge_count==edge_capacity){
+                size_t capacity=edge_capacity?edge_capacity*2u:256u;
+                PartEdge *grown=realloc(edges,capacity*sizeof*edges);if(!grown)goto done;
+                edges=grown;edge_capacity=capacity;
+            }
+            edges[edge_count++]=(PartEdge){n,target,s_part_bufs[target].size};
+        }
+    }
+    if(edge_count>1)qsort(edges,edge_count,sizeof*edges,part_edge_compare);
+    size_t limit=total/(size_t)GENESIS_SPLIT_PART_COUNT*6u/5u;
+    for(size_t e=0;e<edge_count;++e){
+        int a=part_root(parent,edges[e].from),z=part_root(parent,edges[e].to);
+        if(a!=z && sizes[a]+sizes[z]<=limit){parent[z]=a;sizes[a]+=sizes[z];}
+    }
+    int group_count=0;
+    for(int n=count-1;n>=0;--n){int root=part_root(parent,n);next[n]=head[root];head[root]=n;}
+    for(int n=0;n<count;++n)if(parent[n]==n)groups[group_count++]=(PartGroup){n,sizes[n],s_part_bufs[n].address};
+    qsort(groups,(size_t)group_count,sizeof*groups,part_group_compare);
+    size_t loads[GENESIS_SPLIT_PART_COUNT]={0};unsigned together=0;
+    for(size_t e=0;e<edge_count;++e)if(part_root(parent,edges[e].from)==part_root(parent,edges[e].to))++together;
+    for(int g=0;g<group_count;++g){
+        unsigned bucket=0;for(unsigned p=1;p<GENESIS_SPLIT_PART_COUNT;++p)if(loads[p]<loads[bucket])bucket=p;
+        for(int n=head[groups[g].root];n>=0;n=next[n])if(s_part_bufs[n].size)
+            fwrite(s_part_bufs[n].data,1,s_part_bufs[n].size,parts[bucket]);
+        loads[bucket]+=groups[g].size;
+    }
+    printf("[Codegen] Native callgraph: %zu edges, %u clustered, %d bounded groups across %u parts\n",edge_count,together,group_count,GENESIS_SPLIT_PART_COUNT);
+    ready=true;
+done:
+    free(parent);free(head);free(next);free(sizes);free(groups);free(edges);return ready;
 }
 
 /* Frees any buffered-but-unflushed function bodies from a previous (e.g.
@@ -5089,7 +5230,7 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                 "}\n\n",
                 yield_via_pattern ? "pattern-detected: move/tst.b/bne self/rts"
                                   : "game.toml: vblank_yield");
-            part_buf_push(f_func);
+            part_buf_push(f_func,func_addr);
             addrset_free(&instrs);
             addrset_free(&labels);
             continue;
@@ -5260,7 +5401,7 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                      * inside another function's range). */
                     if (fall_through != func_addr &&
                         addrset_contains(&all_funcs, fall_through)) {
-                        emit_split_tail_call(f_func, "  ", fall_through, has_sp_adjust != 0,
+                        emit_split_tail_call(f_func, rom,"  ", fall_through, has_sp_adjust != 0,
                                              -1);
                     }
                 }
@@ -5285,20 +5426,16 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             fprintf(f_func, "\n");
         }
 
-        part_buf_push(f_func);
+        part_buf_push(f_func,func_addr);
         addrset_free(&instrs);
         addrset_free(&labels);
     }
 
-    /* Distribute the buffered function bodies across GENESIS_SPLIT_PART_COUNT
-     * part files, greedily balanced by cumulative byte size: keep filling the
-     * current part until it reaches total_size/N, then advance — clamped so
-     * the last part absorbs any remainder and exactly N files are always
-     * produced (even if some end up holding only the shared #include, e.g.
-     * a game with far fewer functions than parts). Buffers are emitted (and
-     * freed) in the same order functions were discovered, so this is a pure
-     * re-partition — it does not reorder or alter any function body. */
+    /* Keep complete bodies and alias groups intact. Native callgraph clusters
+     * expose same-TU direct edges to the ordinary portable compiler. The old
+     * address-order size balance remains an allocation-failure fallback. */
     {
+        if(!part_buf_callgraph(f_parts,&all_funcs,entry_owners)) {
         size_t total_size = 0;
         for (int i = 0; i < s_part_buf_count; i++)
             total_size += s_part_bufs[i].size;
@@ -5310,16 +5447,13 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             if (s_part_bufs[i].size && s_part_bufs[i].data)
                 fwrite(s_part_bufs[i].data, 1, s_part_bufs[i].size, f_parts[cur_part]);
             cur_part_size += s_part_bufs[i].size;
-            free(s_part_bufs[i].data);
             if (cur_part_size >= target_per_part && cur_part < GENESIS_SPLIT_PART_COUNT - 1) {
                 cur_part++;
                 cur_part_size = 0;
             }
         }
-        free(s_part_bufs);
-        s_part_bufs      = NULL;
-        s_part_buf_count = 0;
-        s_part_buf_cap   = 0;
+        }
+        part_buf_reset();
 
         for (int k = 0; k < GENESIS_SPLIT_PART_COUNT; k++)
             fclose(f_parts[k]);
@@ -5401,12 +5535,20 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
     }
 
     fprintf(f_dispatch,
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "typedef GenesisNativeCallFrame RecompTailFrame;\n"
+        "GenesisNativeCallFrame *g_recomp_native_frame = NULL;\n"
+        "#define g_recomp_tail_frame g_recomp_native_frame\n"
+        "#define RECOMP_FRAME_INIT {0,0,g_recomp_tail_frame,NULL}\n"
+        "#else\n"
         "typedef struct RecompTailFrame {\n"
         "    int pending;\n"
         "    uint32_t addr;\n"
         "    struct RecompTailFrame *prev;\n"
         "} RecompTailFrame;\n\n"
-        "static RecompTailFrame *g_recomp_tail_frame = NULL;\n\n"
+        "static RecompTailFrame *g_recomp_tail_frame = NULL;\n"
+        "#define RECOMP_FRAME_INIT {0,0,g_recomp_tail_frame}\n"
+        "#endif\n\n"
         "/* The frame list lives on the game fiber's stack and its head is\n"
         " * execution state: fiber snapshots carry it (get/set) and rollback\n"
         " * digests hash it address-free (walk, innermost frame first). */\n"
@@ -5427,6 +5569,9 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "        exit(2);\n"
         "    }\n"
         "    g_recomp_tail_frame->addr = addr & 0xFFFFFFu;\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "    g_recomp_tail_frame->function = NULL;\n"
+        "#endif\n"
         "    g_recomp_tail_frame->pending = 1;\n"
         "}\n\n"
         "static void recomp_dispatch_once(uint32_t addr) {\n"
@@ -5446,7 +5591,12 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "    while (frame->pending) {\n"
         "        uint32_t addr = frame->addr;\n"
         "        frame->pending = 0;\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "        RecompFuncPtr native = frame->function; frame->function = NULL;\n"
+        "        if (native) native(); else recomp_dispatch_once(addr);\n"
+        "#else\n"
         "        recomp_dispatch_once(addr);\n"
+        "#endif\n"
         "        if (g_rte_pending)\n"
         "            break;\n"
         "        if (++guard > 1000000u) {\n"
@@ -5455,17 +5605,22 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         "        }\n"
         "    }\n"
         "}\n\n"
+        "#ifdef GENESIS_HAS_NATIVE_CALL_FRAME\n"
+        "void recomp_native_drain(GenesisNativeCallFrame *frame) {\n"
+        "    recomp_drain_tailcalls(frame);\n"
+        "}\n"
+        "#endif\n\n"
         "void recomp_call_func(RecompFuncPtr fn) {\n"
         "    if (!fn)\n"
         "        return;\n"
-        "    RecompTailFrame frame = { 0, 0, g_recomp_tail_frame };\n"
+        "    RecompTailFrame frame = RECOMP_FRAME_INIT;\n"
         "    g_recomp_tail_frame = &frame;\n"
         "    fn();\n"
         "    recomp_drain_tailcalls(&frame);\n"
         "    g_recomp_tail_frame = frame.prev;\n"
         "}\n\n"
         "void recomp_call_addr(uint32_t addr) {\n"
-        "    RecompTailFrame frame = { 0, 0, g_recomp_tail_frame };\n"
+        "    RecompTailFrame frame = RECOMP_FRAME_INIT;\n"
         "    g_recomp_tail_frame = &frame;\n"
         "    recomp_tail_call(addr);\n"
         "    recomp_drain_tailcalls(&frame);\n"
