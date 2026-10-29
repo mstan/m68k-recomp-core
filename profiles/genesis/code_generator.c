@@ -1078,24 +1078,32 @@ static void emit_cycle_accounting(FILE *f, const char *indent, int cycles)
 
 static bool func_is_known(uint32_t addr);
 
-static void emit_static_tail_target(FILE *f,const char *indent,uint32_t addr)
+/* Discovery may promote an external/RAM target into the function table.
+ * Membership alone cannot bypass live RAM trampoline/stub resolution. */
+static bool func_is_native_rom(const GenesisRom *rom,uint32_t addr)
 {
-    if(func_is_known(addr))
+    return rom && rom->rom_data && !rom->read8_override && rom->rom_size>=2 &&
+           !(addr&1u) && addr<=rom->rom_size-2u && func_is_known(addr);
+}
+
+static void emit_static_tail_target(FILE *f,const GenesisRom *rom,const char *indent,uint32_t addr)
+{
+    if(func_is_native_rom(rom,addr))
         fprintf(f,"%sRECOMP_TAIL_NATIVE(0x%06Xu,func_%06X);\n",indent,addr,addr);
     else fprintf(f,"%srecomp_tail_call(0x%06Xu);\n",indent,addr);
 }
 
-static void emit_split_tail_call(FILE *f, const char *indent,
+static void emit_split_tail_call(FILE *f, const GenesisRom *rom,const char *indent,
                                  uint32_t target_addr, bool carry_sp_adjust,
                                  int cycles_before) {
     emit_cycle_accounting(f, indent, cycles_before);
     if (carry_sp_adjust) {
         fprintf(f, "%s{ g_split_sp_popped += _sp_popped; _sp_popped = 0;\n", indent);
-        emit_static_tail_target(f,indent,target_addr);
+        emit_static_tail_target(f,rom,indent,target_addr);
         fprintf(f, "%s  return;\n", indent);
         fprintf(f, "%s}\n", indent);
     } else {
-        emit_static_tail_target(f,indent,target_addr);
+        emit_static_tail_target(f,rom,indent,target_addr);
         fprintf(f,"%sreturn;\n",indent);
     }
 }
@@ -2164,7 +2172,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
             fprintf(f, "  recomp_push_return(0x%06Xu); /* JSR push (callee captures return) */\n",
                     ret_addr);
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
-            if (func_is_known(instr->target_addr))
+            if (func_is_native_rom(rom,instr->target_addr))
                 fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", instr->target_addr);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu);\n", instr->target_addr);
@@ -2186,7 +2194,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
 
         if (instr->has_target) {
             fprintf(f, "  { int _saved_split_sp_popped = g_split_sp_popped; g_split_sp_popped = 0;\n");
-            if (func_is_known(bsr_target))
+            if (func_is_native_rom(rom,bsr_target))
                 fprintf(f, "    RECOMP_CALL_NATIVE(func_%06X);\n", bsr_target);
             else
                 fprintf(f, "    recomp_call_addr(0x%06Xu); /* JSR target not in func table */\n",
@@ -2265,7 +2273,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
                 fprintf(f, "  goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "  ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"  ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         } else if (mode == 2 || mode == 5 || mode == 6 ||
@@ -2387,7 +2395,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "  ", estimate_cycles(instr));
                 fprintf(f, "  goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "  ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"  ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         } else {
@@ -2461,7 +2469,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                     fprintf(f, "  if (%s) {\n", ce);
                     emit_cycle_accounting(f, "    ", estimate_cycles(instr));
                     fprintf(f, "    glue_yield_for_interrupt_poll();\n");
-                    emit_split_tail_call(f, "    ", instr->target_addr, *has_sp_adjust != 0,
+                    emit_split_tail_call(f, rom,"    ", instr->target_addr, *has_sp_adjust != 0,
                                          -1);
                     fprintf(f, "  }\n");
                 }
@@ -2473,7 +2481,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 fprintf(f, "  }\n");
             } else {
                 fprintf(f, "  if (%s) {\n", ce);
-                emit_split_tail_call(f, "    ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"    ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
                 fprintf(f, "  }\n");
             }
@@ -2502,7 +2510,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
                 emit_cycle_accounting(f, "      ", estimate_cycles(instr));
                 fprintf(f, "      goto label_%06X;\n", instr->target_addr);
             } else {
-                emit_split_tail_call(f, "      ", instr->target_addr, *has_sp_adjust != 0,
+                emit_split_tail_call(f, rom,"      ", instr->target_addr, *has_sp_adjust != 0,
                                      estimate_cycles(instr));
             }
         }
@@ -5272,7 +5280,7 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                      * inside another function's range). */
                     if (fall_through != func_addr &&
                         addrset_contains(&all_funcs, fall_through)) {
-                        emit_split_tail_call(f_func, "  ", fall_through, has_sp_adjust != 0,
+                        emit_split_tail_call(f_func, rom,"  ", fall_through, has_sp_adjust != 0,
                                              -1);
                     }
                 }
