@@ -26,6 +26,18 @@ static uint8_t *data_pointer(M68kStepContext *c,uint32_t a,size_t bytes,int writ
     *view=current;return view->data+(a-view->address);
 }
 
+int m68k_step_owned_rmw(M68kStepContext*c,uint32_t a,unsigned bytes,M68kStepOwnedRmw*out)
+{
+    if(!c||!out||!c->fault_escape||!c->data_active||
+       (bytes!=1&&bytes!=2&&bytes!=4))return 0;
+    a&=0xffffffu;
+    if((bytes>1&&(a&1u))||bytes>0x1000000u-a)return 0;
+    if(bytes==1?(!c->bus.read8||!c->bus.write8):(!c->bus.read16||!c->bus.write16))return 0;
+    uint8_t *read=data_pointer(c,a,bytes,0);if(!read)return 0;
+    uint8_t *write=data_pointer(c,a,bytes,1);if(!write)return 0;
+    out->read=read;out->write=write;++c->owned_rmw_grants;return 1;
+}
+
 static void fault(M68kStepContext *c,M68kStepResult reason,uint32_t address)
 {
     data_end(c);
@@ -226,6 +238,36 @@ M68kStepResult m68k_step_execute_register(M68kStepContext *c,const M68kStepEntry
     c->state.regs.PC=(pc+(uint32_t)bytes)&0xffffffu;
     entry->execute(c);
     c->state.cycles+=c->charge;++c->state.instructions;
+    return M68K_STEP_OK;
+}
+M68kStepResult m68k_step_execute_span(M68kStepContext *c,const M68kStepRegisterSpan *span,uint64_t budget)
+{
+    if(c->fault_escape)return M68K_STEP_REENTERED;
+    if(c->state.fault)return (M68kStepResult)c->state.fault;
+    if(c->state.stopped)return M68K_STEP_STOPPED;
+    if(!span || !span->entries || !span->execute || span->count<2 ||
+       span->count>M68K_STEP_REGISTER_SPAN_MAX || !span->cycles || span->cycles>budget ||
+       !c->code_span || !c->bus.fetch16 || (c->state.regs.SR&T))return M68K_STEP_MISS;
+    uint32_t pc=c->state.regs.PC,next=pc;unsigned total=0;
+    if((pc&1u) || pc>0xffffffu)return M68K_STEP_MISS;
+    for(unsigned n=0;n<span->count;++n) {
+        const M68kStepEntry *e=span->entries[n];
+        if(!e || !e->execute || !e->cycles || !e->word_count || e->word_count>11 || e->pc!=next ||
+           (unsigned)e->word_count*2u>0x1000000u-next)return M68K_STEP_MISS;
+        total+=e->cycles;next+=(unsigned)e->word_count*2u;
+    }
+    if(total!=span->cycles)return M68K_STEP_MISS;
+    const uint8_t *bytes=c->code_span(c->user,pc,next-pc);if(!bytes)return M68K_STEP_MISS;
+    for(unsigned n=0;n<span->count;++n) {
+        const M68kStepEntry *e=span->entries[n];unsigned offset=e->pc-pc;
+        for(unsigned w=0;w<e->word_count;++w,offset+=2u)
+            if((((unsigned)bytes[offset]<<8)|bytes[offset+1u])!=e->words[w])return M68K_STEP_MISS;
+    }
+    span->execute(c);
+    const M68kStepEntry *last=span->entries[span->count-1u];
+    c->state.regs.PC=next&0xffffffu;c->state.instruction_pc=last->pc;
+    c->state.fault_opcode=last->words[0];c->state.exception_vector=0;c->charge=last->cycles;
+    c->state.cycles+=span->cycles;c->state.instructions+=span->count;
     return M68K_STEP_OK;
 }
 static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *entry,M68kStepOperation operation,int tracked)
