@@ -107,6 +107,8 @@ typedef struct {
  * means an arbitrary observable callback. */
 typedef struct {
     const M68kStepModule *module;
+    /* Bit-test REGISTER before execute_register. TRACKED_BUS alone is not
+     * register-pure; never interpret these flags as a nonzero purity bool. */
     const uint8_t *register_only;
 } M68kStepEffectModule;
 
