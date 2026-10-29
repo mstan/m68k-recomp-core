@@ -2853,7 +2853,7 @@ static void emit_instr(FILE *f, const GenesisRom *rom,
         const char *sext = (sz == M68K_SIZE_W) ?
             "(uint32_t)(int32_t)(int16_t)" : "(uint32_t)";
         fprintf(f, "  { uint32_t _cmp_b = %s(%s);\n", sext, src_expr);
-        fprintf(f, "    uint32_t _cmp_r = (uint32_t)((int32_t)g_cpu.A[%d] - (int32_t)_cmp_b);\n", areg);
+        fprintf(f, "    uint32_t _cmp_r = g_cpu.A[%d] - _cmp_b;\n", areg);
         /* CMPA does not affect X flag */
         fprintf(f, "    g_cpu.SR &= ~(0x0Fu);\n");
         fprintf(f, "    if (!_cmp_r) g_cpu.SR |= (1u<<2);\n");
