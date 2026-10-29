@@ -4633,6 +4633,7 @@ static void emit_decls_preamble(FILE *f) {
 typedef struct {
     char   *data;
     size_t  size;
+    uint32_t address;
 } PartBuf;
 
 static PartBuf *s_part_bufs      = NULL;
@@ -4641,12 +4642,13 @@ static int      s_part_buf_cap   = 0;
 
 /* Reads back everything written to `tmp`, appends it as a new buffered
  * function body, and closes `tmp` (tmpfile()s are unlinked on close). */
-static void part_buf_push(FILE *tmp) {
+static void part_buf_push(FILE *tmp,uint32_t address) {
     long sz = ftell(tmp);
     if (sz < 0) sz = 0;
     rewind(tmp);
-    char *buf = (char *)malloc((size_t)(sz > 0 ? sz : 1));
+    char *buf = (char *)malloc((size_t)(sz > 0 ? sz : 0)+1u);
     size_t rd = (sz > 0 && buf) ? fread(buf, 1, (size_t)sz, tmp) : 0;
+    if(buf)buf[rd]=0;
     fclose(tmp);
     if (s_part_buf_count == s_part_buf_cap) {
         s_part_buf_cap = s_part_buf_cap ? s_part_buf_cap * 2 : 256;
@@ -4655,7 +4657,91 @@ static void part_buf_push(FILE *tmp) {
     }
     s_part_bufs[s_part_buf_count].data = buf;
     s_part_bufs[s_part_buf_count].size = rd;
+    s_part_bufs[s_part_buf_count].address = address;
     s_part_buf_count++;
+}
+
+typedef struct {int from,to;size_t target_size;} PartEdge;
+typedef struct {int root;size_t size;uint32_t address;} PartGroup;
+static int part_edge_compare(const void *a,const void *b)
+{
+    const PartEdge*x=a,*y=b;
+    if(x->target_size!=y->target_size)return x->target_size<y->target_size?-1:1;
+    if(x->from!=y->from)return x->from<y->from?-1:1;
+    return x->to<y->to?-1:x->to!=y->to;
+}
+static int part_group_compare(const void *a,const void *b)
+{
+    const PartGroup*x=a,*y=b;
+    if(x->size!=y->size)return x->size>y->size?-1:1;
+    return x->address<y->address?-1:x->address!=y->address;
+}
+static int part_root(int *parent,int n)
+{while(parent[n]!=n){parent[n]=parent[parent[n]];n=parent[n];}return n;}
+static int part_find(uint32_t address)
+{
+    int lo=0,hi=s_part_buf_count;
+    while(lo<hi){int mid=lo+(hi-lo)/2;if(s_part_bufs[mid].address<address)lo=mid+1;else hi=mid;}
+    return lo<s_part_buf_count&&s_part_bufs[lo].address==address?lo:-1;
+}
+/* Direct native edges expose compiler inlining only when both definitions
+ * share a TU. Keep complete canonical bodies/alias wrappers byte-identical,
+ * cluster small callees within a bounded size, then balance whole clusters.
+ * No profile, semantic substitution or unbounded monolithic TU is required.
+ * Allocation failure retains the previous portable address-order layout. */
+static bool part_buf_callgraph(FILE **parts,const AddrSet *functions,const uint32_t *owners)
+{
+    int count=s_part_buf_count;size_t edge_count=0,edge_capacity=0,total=0;
+    PartEdge *edges=NULL;int *parent=malloc((size_t)count*sizeof*parent);
+    int *head=malloc((size_t)count*sizeof*head),*next=malloc((size_t)count*sizeof*next);
+    size_t *sizes=malloc((size_t)count*sizeof*sizes);
+    PartGroup *groups=malloc((size_t)count*sizeof*groups);
+    bool ready=false;
+    if(!count || !parent || !head || !next || !sizes || !groups)goto done;
+    for(int n=0;n<count;++n){parent[n]=n;head[n]=-1;sizes[n]=s_part_bufs[n].size;total+=sizes[n];}
+    for(int n=0;n<count;++n)for(unsigned kind=0;kind<2;++kind){
+        const char *marker=kind?"RECOMP_TAIL_NATIVE(":"RECOMP_CALL_NATIVE(";
+        const char *at=s_part_bufs[n].data;
+        while(at && (at=strstr(at,marker))!=NULL){
+            at+=strlen(marker);const char *symbol=strstr(at,"func_");
+            const char *end=strchr(at,')');
+            if(!symbol || !end || symbol>end)continue;
+            char *tail;uint32_t address=(uint32_t)strtoul(symbol+5,&tail,16);
+            if(tail!=symbol+11)continue;
+            int lo=0,hi=functions->count;
+            while(lo<hi){int mid=lo+(hi-lo)/2;if(functions->addrs[mid]<address)lo=mid+1;else hi=mid;}
+            if(lo==functions->count || functions->addrs[lo]!=address)continue;
+            int target=part_find(owners[lo]);if(target<0 || target==n)continue;
+            if(edge_count==edge_capacity){
+                size_t capacity=edge_capacity?edge_capacity*2u:256u;
+                PartEdge *grown=realloc(edges,capacity*sizeof*edges);if(!grown)goto done;
+                edges=grown;edge_capacity=capacity;
+            }
+            edges[edge_count++]=(PartEdge){n,target,s_part_bufs[target].size};
+        }
+    }
+    if(edge_count>1)qsort(edges,edge_count,sizeof*edges,part_edge_compare);
+    size_t limit=total/(size_t)GENESIS_SPLIT_PART_COUNT*6u/5u;
+    for(size_t e=0;e<edge_count;++e){
+        int a=part_root(parent,edges[e].from),z=part_root(parent,edges[e].to);
+        if(a!=z && sizes[a]+sizes[z]<=limit){parent[z]=a;sizes[a]+=sizes[z];}
+    }
+    int group_count=0;
+    for(int n=count-1;n>=0;--n){int root=part_root(parent,n);next[n]=head[root];head[root]=n;}
+    for(int n=0;n<count;++n)if(parent[n]==n)groups[group_count++]=(PartGroup){n,sizes[n],s_part_bufs[n].address};
+    qsort(groups,(size_t)group_count,sizeof*groups,part_group_compare);
+    size_t loads[GENESIS_SPLIT_PART_COUNT]={0};unsigned together=0;
+    for(size_t e=0;e<edge_count;++e)if(part_root(parent,edges[e].from)==part_root(parent,edges[e].to))++together;
+    for(int g=0;g<group_count;++g){
+        unsigned bucket=0;for(unsigned p=1;p<GENESIS_SPLIT_PART_COUNT;++p)if(loads[p]<loads[bucket])bucket=p;
+        for(int n=head[groups[g].root];n>=0;n=next[n])if(s_part_bufs[n].size)
+            fwrite(s_part_bufs[n].data,1,s_part_bufs[n].size,parts[bucket]);
+        loads[bucket]+=groups[g].size;
+    }
+    printf("[Codegen] Native callgraph: %zu edges, %u clustered, %d bounded groups across %u parts\n",edge_count,together,group_count,GENESIS_SPLIT_PART_COUNT);
+    ready=true;
+done:
+    free(parent);free(head);free(next);free(sizes);free(groups);free(edges);return ready;
 }
 
 /* Frees any buffered-but-unflushed function bodies from a previous (e.g.
@@ -5144,7 +5230,7 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
                 "}\n\n",
                 yield_via_pattern ? "pattern-detected: move/tst.b/bne self/rts"
                                   : "game.toml: vblank_yield");
-            part_buf_push(f_func);
+            part_buf_push(f_func,func_addr);
             addrset_free(&instrs);
             addrset_free(&labels);
             continue;
@@ -5340,20 +5426,16 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             fprintf(f_func, "\n");
         }
 
-        part_buf_push(f_func);
+        part_buf_push(f_func,func_addr);
         addrset_free(&instrs);
         addrset_free(&labels);
     }
 
-    /* Distribute the buffered function bodies across GENESIS_SPLIT_PART_COUNT
-     * part files, greedily balanced by cumulative byte size: keep filling the
-     * current part until it reaches total_size/N, then advance — clamped so
-     * the last part absorbs any remainder and exactly N files are always
-     * produced (even if some end up holding only the shared #include, e.g.
-     * a game with far fewer functions than parts). Buffers are emitted (and
-     * freed) in the same order functions were discovered, so this is a pure
-     * re-partition — it does not reorder or alter any function body. */
+    /* Keep complete bodies and alias groups intact. Native callgraph clusters
+     * expose same-TU direct edges to the ordinary portable compiler. The old
+     * address-order size balance remains an allocation-failure fallback. */
     {
+        if(!part_buf_callgraph(f_parts,&all_funcs,entry_owners)) {
         size_t total_size = 0;
         for (int i = 0; i < s_part_buf_count; i++)
             total_size += s_part_bufs[i].size;
@@ -5365,16 +5447,13 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
             if (s_part_bufs[i].size && s_part_bufs[i].data)
                 fwrite(s_part_bufs[i].data, 1, s_part_bufs[i].size, f_parts[cur_part]);
             cur_part_size += s_part_bufs[i].size;
-            free(s_part_bufs[i].data);
             if (cur_part_size >= target_per_part && cur_part < GENESIS_SPLIT_PART_COUNT - 1) {
                 cur_part++;
                 cur_part_size = 0;
             }
         }
-        free(s_part_bufs);
-        s_part_bufs      = NULL;
-        s_part_buf_count = 0;
-        s_part_buf_cap   = 0;
+        }
+        part_buf_reset();
 
         for (int k = 0; k < GENESIS_SPLIT_PART_COUNT; k++)
             fclose(f_parts[k]);
