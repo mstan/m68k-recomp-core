@@ -37,6 +37,37 @@ static const M68KInstr *s_diag_instr     = NULL;
 static bool s_span_flags = false;
 static unsigned s_span_live_flags = 31;
 
+/* MSVCRT tmpfile() permits only TMP_MAX creations in a process, even when
+ * every file is closed. Large cartridges exceed that with one stream per
+ * function/span. Emission is single-threaded: a function body may contain an
+ * operation emission, but operation emissions do not nest. Reuse one stream
+ * for each role and close both at exit. Readers use the current ftell length,
+ * so an older, longer body beyond that length is never copied. */
+static FILE *s_emission_buffers[2];
+static void emission_buffers_close(void)
+{
+    for (unsigned n=0;n<2;++n) {
+        if (s_emission_buffers[n]) fclose(s_emission_buffers[n]);
+        s_emission_buffers[n]=NULL;
+    }
+}
+static FILE *emission_buffer(unsigned role)
+{
+    static bool registered;
+    if (!registered) {
+        if (atexit(emission_buffers_close)) return NULL;
+        registered=true;
+    }
+    FILE *file=s_emission_buffers[role];
+    if (!file) {
+        file=tmpfile();
+        s_emission_buffers[role]=file;
+    } else if (fseek(file,0,SEEK_SET) || ferror(file)) {
+        return NULL;
+    }
+    return file;
+}
+
 /* =========================================================================
  * AddrSet — simple sorted dynamic array of uint32_t addresses
  * ========================================================================= */
@@ -4436,7 +4467,7 @@ static bool owned_rmw_same_ea(const char*body,size_t a,size_t a_end,size_t b,siz
 bool codegen_emit_owned_rmw_operation(FILE*out,const GenesisRom*rom,const M68KInstr*ins)
 {
     if(!out||!rom||!codegen_owned_rmw_instruction(ins))return false;
-    FILE*buffer=tmpfile();if(!buffer)return false;
+    FILE*buffer=emission_buffer(1);if(!buffer)return false;
     bool ok=codegen_emit_step_operation(buffer,rom,ins)&&!fflush(buffer);
     long size=ok?ftell(buffer):-1;char*body=NULL;bool emitted=false;
     if(size<=0||size>1048576||fseek(buffer,0,SEEK_SET))goto done;
@@ -4461,7 +4492,7 @@ bool codegen_emit_owned_rmw_operation(FILE*out,const GenesisRom*rom,const M68KIn
     fputs("    }else{\n",out);fwrite(body,1,(size_t)size,out);fputs("    }\n  }\n",out);
     emitted=!ferror(out);
 done:
-    free(body);if(fclose(buffer))emitted=false;return emitted;
+    free(body);return emitted;
 }
 
 unsigned codegen_step_nominal_cycles(const M68KInstr *ins)
@@ -4562,7 +4593,7 @@ bool codegen_emit_register_span(FILE *out,const GenesisRom *rom,const M68KInstr 
            (n && ins[n-1].addr+ins[n-1].byte_length!=ins[n].addr))return false;
         live[n]=need;need=(need&~written)|read;
     }
-    FILE *buffer=tmpfile();if(!buffer)return false;
+    FILE *buffer=emission_buffer(1);if(!buffer)return false;
     bool old_active=s_span_flags;unsigned old_live=s_span_live_flags;
     s_span_flags=true;
     bool okay=true;
@@ -4577,7 +4608,6 @@ bool codegen_emit_register_span(FILE *out,const GenesisRom *rom,const M68KInstr 
     char *text=size>=0?malloc((size_t)size+1u):NULL;
     if(!text)okay=false;
     if(okay && (fseek(buffer,0,SEEK_SET) || fread(text,1,(size_t)size,buffer)!=(size_t)size))okay=false;
-    if(fclose(buffer))okay=false;
     if(!okay){free(text);return false;}
     text[size]=0;
     unsigned used=0;
@@ -4669,7 +4699,7 @@ static void emit_decls_preamble(FILE *f) {
 /* =========================================================================
  * Per-function body buffering for size-balanced part-file distribution.
  *
- * Each function is fully emitted to an anonymous tmpfile() first so its
+ * Each function is fully emitted to a reused anonymous stream first so its
  * exact byte size is known; the buffered text is then copied verbatim into
  * whichever part file the greedy balancer assigns it to. This keeps the
  * ~4300 lines of per-instruction fprintf(f, ...) emission above completely
@@ -4686,8 +4716,8 @@ static PartBuf *s_part_bufs      = NULL;
 static int      s_part_buf_count = 0;
 static int      s_part_buf_cap   = 0;
 
-/* Reads back everything written to `tmp`, appends it as a new buffered
- * function body, and closes `tmp` (tmpfile()s are unlinked on close). */
+/* Reads back the current body length and appends a new buffered function.
+ * The anonymous stream is rewound and reused for the next function. */
 static void part_buf_push(FILE *tmp,uint32_t address) {
     long sz = ftell(tmp);
     if (sz < 0) sz = 0;
@@ -4695,7 +4725,6 @@ static void part_buf_push(FILE *tmp,uint32_t address) {
     char *buf = (char *)malloc((size_t)(sz > 0 ? sz : 0)+1u);
     size_t rd = (sz > 0 && buf) ? fread(buf, 1, (size_t)sz, tmp) : 0;
     if(buf)buf[rd]=0;
-    fclose(tmp);
     if (s_part_buf_count == s_part_buf_cap) {
         s_part_buf_cap = s_part_buf_cap ? s_part_buf_cap * 2 : 256;
         s_part_bufs = (PartBuf *)realloc(s_part_bufs,
@@ -5054,9 +5083,9 @@ bool codegen_emit(const GenesisRom *rom, const FunctionList *funcs,
         /* Buffer this function's full emission (through both possible exit
          * points below) so its exact byte size is known before deciding
          * which balanced part file it lands in. See part_buf_push(). */
-        FILE *f_func = tmpfile();
+        FILE *f_func = emission_buffer(0);
         if (!f_func) {
-            fprintf(stderr, "codegen: tmpfile() failed while emitting func_%06X\n",
+            fprintf(stderr, "codegen: cannot open/reset emission buffer for func_%06X\n",
                     func_addr);
             free(entry_owners);
             addrset_free(&hard_boundaries);
