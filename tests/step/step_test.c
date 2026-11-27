@@ -33,6 +33,36 @@ static void unimplemented(M68kStepContext*c){m68k_step_unimplemented(c);c->state
 static M68kStepEntry entry(uint32_t pc,uint16_t word,M68kStepOperation fn,unsigned cycles)
 {M68kStepEntry e={0};e.pc=pc;e.words[0]=word;e.word_count=1;e.execute=fn;e.cycles=(uint16_t)cycles;return e;}
 
+static void stop_at_device(M68kStepContext *context)
+{
+    ++context->state.regs.D[0];
+    context->block_stop = 1;
+}
+
+static void check_bound_block(M68kStepContext *context)
+{
+    CHECK(m68k_step_reset(context) == M68K_STEP_OK);
+    const M68kStepEntry first = entry(0x200, 0x4e71, nop, 4);
+    const M68kStepEntry device = entry(0x202, 0x4e71, stop_at_device, 4);
+    const M68kStepEntry last = entry(0x204, 0x4e71, nop, 4);
+    const M68kStepEntry fault = entry(0x206, 0x4e71, bad_read, 4);
+    const M68kStepEntry *index[0x104] = {0};
+    index[0x100] = &first;
+    index[0x101] = &device;
+    index[0x102] = &last;
+    context->bus.fetch16 = NULL;
+    CHECK(m68k_step_execute_bound_block(context, index, 0x104, 20) == M68K_STEP_OK);
+    CHECK(context->state.instructions == 2 && context->state.cycles == 8);
+    CHECK(context->state.regs.PC == 0x204 && context->state.regs.D[0] == 1);
+
+    CHECK(m68k_step_execute_bound_block(context, index, 0x104, 20) == M68K_STEP_MISS);
+    CHECK(context->state.instructions == 3 && context->state.regs.PC == 0x206);
+    index[0x103] = &fault;
+    CHECK(m68k_step_execute_bound_block(context, index, 0x104, 20) == M68K_STEP_ADDRESS_ERROR);
+    CHECK(context->state.instructions == 3 && context->state.instruction_pc == 0x206);
+    CHECK(context->state.fault_address == 0x601 && !context->fault_escape);
+}
+
 int main(void)
 {
     Bus b={0};M68kStepBus ops={read8,read16,write8,write16,read16,wait_bus,ack,reset_devices};M68kStepContext c;
@@ -95,6 +125,7 @@ int main(void)
     CHECK(m68k_step_reset(&c)==M68K_STEP_OK);
     CHECK(m68k_step_execute_live(&c,unimplemented)==M68K_STEP_UNSUPPORTED && !c.state.cycles && !c.state.instructions && !c.state.regs.D[1]);
     CHECK(c.state.fault_address==0x200 && c.state.fault_opcode==0x303C && !c.fault_escape);
-    puts("Explicit-PC byte guards, CPU control/stacks, interrupts, trace and resumable bus WAIT pass");
+    check_bound_block(&c);
+    puts("Explicit-PC byte guards, CPU control/stacks, interrupts, trace, bus WAIT and bound blocks pass");
     return 0;
 }

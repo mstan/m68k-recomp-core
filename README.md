@@ -6,6 +6,10 @@ Shared clean-room Motorola 68000-family static-recompiler frontend used by
 [segagenesisrecomp](https://github.com/mstan/segagenesisrecomp) and
 [cdirecomp](https://github.com/mstan/cdirecomp).
 
+The context-bound runtime also serves Saturn and 32X. Its bound-block API
+shares instruction retirement, faults and trace handling with individual native
+operations; callers retain code invalidation and device-observation boundaries.
+
 The initial extraction deliberately preserves the two validated policy
 profiles while centralizing the genuinely common instruction layer:
 
