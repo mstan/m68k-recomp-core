@@ -1,5 +1,7 @@
 # m68k-recomp-core
 
+Current licensing and the grant for existing owner contributions are documented in [LICENSE-SCOPE.md](LICENSE-SCOPE.md).
+
 Shared clean-room Motorola 68000-family static-recompiler frontend used by
 [segagenesisrecomp](https://github.com/mstan/segagenesisrecomp) and
 [cdirecomp](https://github.com/mstan/cdirecomp).
