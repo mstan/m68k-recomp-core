@@ -319,6 +319,28 @@ M68kStepResult m68k_step_execute_flow_span(M68kStepContext *c,const M68kStepFlow
 {return execute_flow_span(c,span,budget,0);}
 M68kStepResult m68k_step_execute_validated_flow_span(M68kStepContext *c,const M68kStepFlowSpan *span,uint64_t budget)
 {return execute_flow_span(c,span,budget,1);}
+
+static inline void retire_operation(M68kStepContext *c, const M68kStepEntry *entry,
+                             M68kStepOperation operation, int tracked)
+{
+    const uint32_t pc = c->state.regs.PC;
+    const int trace = (c->state.regs.SR & T) != 0;
+    c->state.instruction_pc = pc;
+    c->state.fault_opcode = entry ? entry->words[0] : m68k_step_fetch16(c, pc);
+    c->state.exception_vector = 0;
+    c->charge = entry ? entry->cycles : 4;
+    c->state.regs.PC = (pc + (entry ? entry->word_count * 2u : 2u)) & 0xffffffu;
+    c->data_active = tracked && c->data_region && !trace;
+    operation(c);
+    data_end(c);
+    if (trace && !c->state.exception_vector) {
+        enter_exception(c, 9, c->state.regs.PC);
+        c->charge += 34;
+    }
+    c->state.cycles += c->charge;
+    ++c->state.instructions;
+}
+
 static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *entry,M68kStepOperation operation,int tracked,int verified)
 {
     if(c->fault_escape)return M68K_STEP_REENTERED;
@@ -345,21 +367,50 @@ static M68kStepResult execute_operation(M68kStepContext *c,const M68kStepEntry *
             if(word!=entry->words[n]){c->fault_escape=NULL;return M68K_STEP_MISS;}
         }
     }
-    int trace=(c->state.regs.SR&T)!=0;
-    c->state.instruction_pc=pc;
-    c->state.fault_opcode=entry?entry->words[0]:m68k_step_fetch16(c,pc);
-    c->state.exception_vector=0;c->charge=entry?entry->cycles:4;
-    c->state.regs.PC=(pc+(entry?entry->word_count*2u:2u))&0xFFFFFFu;
-    c->data_active=tracked&&c->data_region&&!trace;
-    operation(c);
-    data_end(c);
-    if(trace && !c->state.exception_vector) {
-        enter_exception(c,9,c->state.regs.PC);c->charge+=34;
-    }
-    c->state.cycles+=c->charge;++c->state.instructions;
+    retire_operation(c,entry,operation,tracked);
     c->fault_escape=NULL;
     return M68K_STEP_OK;
 }
+
+M68kStepResult m68k_step_execute_bound_block(M68kStepContext *c,
+    const M68kStepEntry *const *index, size_t words, uint64_t until_cycle)
+{
+    if (c->fault_escape)
+        return M68K_STEP_REENTERED;
+    if (c->state.fault)
+        return (M68kStepResult)c->state.fault;
+    if (c->state.stopped)
+        return M68K_STEP_STOPPED;
+    if (!index)
+        return M68K_STEP_MISS;
+
+    data_end(c);
+    c->block_stop = 0;
+    jmp_buf escape;
+    c->fault_escape = &escape;
+    if (setjmp(escape)) {
+        data_end(c);
+        c->fault_escape = NULL;
+        return (M68kStepResult)c->state.fault;
+    }
+
+    M68kStepResult result = M68K_STEP_OK;
+    while (c->state.cycles < until_cycle) {
+        const uint32_t pc = c->state.regs.PC;
+        if ((pc & 1u) || pc / 2u >= words || !index[pc / 2u]) {
+            result = M68K_STEP_MISS;
+            break;
+        }
+        const M68kStepEntry *entry = index[pc / 2u];
+        const uint16_t previous_sr = c->state.regs.SR;
+        retire_operation(c, entry, entry->execute, 0);
+        if (c->block_stop || c->state.stopped || ((previous_sr ^ c->state.regs.SR) & 0x0700))
+            break;
+    }
+    c->fault_escape = NULL;
+    return result;
+}
+
 M68kStepResult m68k_step_execute(M68kStepContext *c,const M68kStepEntry *entry)
 {return execute_operation(c,entry,entry?entry->execute:NULL,0,0);}
 M68kStepResult m68k_step_execute_tracked(M68kStepContext *c,const M68kStepEntry *entry)

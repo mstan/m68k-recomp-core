@@ -83,6 +83,8 @@ typedef struct M68kStepContext {
     unsigned data_active;
     /* Host diagnostic only, never architectural state or a speedup claim. */
     uint64_t owned_rmw_grants;
+    /* An owner callback may end a bound block after the current operation. */
+    unsigned block_stop;
 } M68kStepContext;
 #define M68K_STEP_HAS_CODE_SPANS 1
 typedef const uint8_t *(*M68kStepCodeSpan)(void *,uint32_t,size_t);
@@ -194,6 +196,13 @@ M68kStepResult m68k_step_execute_validated_register(M68kStepContext *,const M68k
 M68kStepResult m68k_step_execute_validated_span(M68kStepContext *,const M68kStepRegisterSpan *,uint64_t);
 M68kStepResult m68k_step_execute_validated_flow_span(M68kStepContext *,const M68kStepFlowSpan *,uint64_t);
 #define M68K_STEP_HAS_CODE_INTERVALS 1
+/* Execute content-bound entries indexed by PC / 2 up to the next observer.
+ * The owner keeps that index valid across all callbacks and clears entries
+ * before modified code can execute. A null slot ends the block with MISS at
+ * its guest PC. Earlier operations remain retired. MMIO callbacks can set
+ * block_stop to force a service boundary immediately after the operation. */
+M68kStepResult m68k_step_execute_bound_block(M68kStepContext *,
+    const M68kStepEntry *const *index, size_t words, uint64_t until_cycle);
 /* Runtime correctness floors use the same exception/WAIT/trace boundary.
  * The callback decodes current bytes and sets PC/charge; no stale entry or
  * process-global CPU binding is used. Unsupported semantics must halt. */
